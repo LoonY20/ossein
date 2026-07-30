@@ -90,7 +90,9 @@ The initial direction is to integrate proven Go database tooling instead of buil
 
 Goal: make Ossein useful for real backend services.
 
-- [ ] cache contracts and drivers
+- [x] cache contract
+- [x] in-memory cache driver
+- [ ] distributed cache driver
 - [ ] queues and workers
 - [ ] retries and backoff
 - [ ] failed jobs / dead-letter handling
