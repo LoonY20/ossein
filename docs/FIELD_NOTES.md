@@ -184,7 +184,7 @@ mechanical, dependency-free, and currently rewritten per project.
 ### 8. No queue or worker layer
 
 Acknowledging a webhook in milliseconds and processing it afterwards required
-hand-writing ~190 lines: bounded channel, worker pool, retry with backoff,
+hand-writing a 210-line file: bounded channel, worker pool, retry with backoff,
 back-pressure signalling, drain-on-shutdown, lifecycle registration, and
 counters. None of it was application-specific.
 
