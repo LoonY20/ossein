@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: ossein_test
+          POSTGRES_USER: ossein
+          POSTGRES_PASSWORD: ossein
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ossein -d ossein_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: ossein_test
+          MYSQL_USER: ossein
+          MYSQL_PASSWORD: ossein
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u ossein --password=ossein"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      OSSEIN_POSTGRES_DSN: postgres://ossein:ossein@127.0.0.1:5432/ossein_test?sslmode=disable
+      OSSEIN_MYSQL_DSN: ossein:ossein@tcp(127.0.0.1:3306)/ossein_test?parseTime=true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check formatting
+        run: |
+          test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build CLI
+        run: go build ./cmd/ossein
+
+      - name: Test with race detector
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Test PostgreSQL integration
+        working-directory: integration/postgres
+        run: go test -race ./...
+
+      - name: Test MySQL integration
+        working-directory: integration/mysql
+        run: go test -race ./...
+
+      - name: Enforce coverage
+        run: |
+          coverage="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
+          echo "Total coverage: ${coverage}%"
+          awk -v coverage="$coverage" 'BEGIN { if (coverage < 85) exit 1 }'

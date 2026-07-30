@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose an improvement consistent with Ossein's design principles
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What repetitive work or limitation should Ossein address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API
+      description: Show how the feature could look in ordinary Go code.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Which standard library or ecosystem approaches have you considered?

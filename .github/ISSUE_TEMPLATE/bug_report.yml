@@ -1,0 +1,40 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Ossein
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest Go program or repository that reproduces the issue.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ossein version
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      placeholder: go1.23.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system
+    validations:
+      required: true
