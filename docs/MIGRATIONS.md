@@ -125,16 +125,22 @@ source. The lock timeout defaults to 30 seconds and must be positive.
 
 ## Deployment concurrency
 
-A runner always serializes operations within its process. PostgreSQL and MySQL
-also acquire database-level locks derived from the metadata table name:
+A runner always serializes operations within its process. Each dialect also
+coordinates runners that use independent pools or processes:
 
 - PostgreSQL uses `pg_advisory_lock`;
 - MySQL uses the session-level `GET_LOCK` and `RELEASE_LOCK` functions.
+- SQLite starts each migration with `BEGIN IMMEDIATE` before reading migration
+  metadata and configures `PRAGMA busy_timeout` from the runner lock timeout.
 
-The lock and the complete migration operation use one dedicated `database/sql`
-connection, so runners in separate processes cannot apply the same version
-concurrently. Lock acquisition stops when the configured lock timeout or the
-context passed to `Up` or `Down` expires. A configured timeout is reported as
+PostgreSQL and MySQL keep the lock and the complete migration operation on one
+dedicated `database/sql` connection. SQLite uses one immediate write
+transaction per migration and rereads the metadata after every wait. Runners
+in separate processes therefore cannot apply the same version concurrently,
+while each migration keeps its own commit boundary.
+
+Lock acquisition stops when the configured lock timeout or the context passed
+to `Up` or `Down` expires. A configured timeout is reported as
 `migrate.ErrLockTimeout`, which can be checked with `errors.Is`.
 
 PostgreSQL and MySQL runners using different metadata tables receive different
@@ -142,8 +148,9 @@ locks and can operate independently. MySQL named locks are server-wide, so
 applications sharing one MySQL server should keep metadata table names unique
 when they need independent migration schedules.
 
-SQLite currently has only the in-process lock. Run SQLite migrations as one
-deployment job until a multi-process strategy is implemented.
+SQLite has one writer per database file, so runners using different metadata
+tables in the same file still serialize their write transactions. Readers may
+continue concurrently according to the application's SQLite journal mode.
 
 ## CLI wiring
 

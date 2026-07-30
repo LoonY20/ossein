@@ -17,12 +17,13 @@ var ErrLockTimeout = errors.New("ossein migrate: lock timeout")
 // Dialect describes the small amount of SQL syntax required by the migration
 // metadata table.
 type Dialect struct {
-	name        string
-	quoteLeft   string
-	quoteRight  string
-	placeholder func(int) string
-	lock        func(context.Context, *sql.Conn, int64, time.Duration) error
-	unlock      func(context.Context, *sql.Conn, int64) error
+	name              string
+	quoteLeft         string
+	quoteRight        string
+	placeholder       func(int) string
+	lock              func(context.Context, *sql.Conn, int64, time.Duration) error
+	unlock            func(context.Context, *sql.Conn, int64) error
+	transactionalLock bool
 }
 
 // Name returns the dialect's stable name.
@@ -108,10 +109,11 @@ func MySQL() Dialect {
 // SQLite returns the SQLite migration dialect.
 func SQLite() Dialect {
 	return Dialect{
-		name:        "sqlite",
-		quoteLeft:   `"`,
-		quoteRight:  `"`,
-		placeholder: func(int) string { return "?" },
+		name:              "sqlite",
+		quoteLeft:         `"`,
+		quoteRight:        `"`,
+		placeholder:       func(int) string { return "?" },
+		transactionalLock: true,
 	}
 }
 
@@ -136,6 +138,9 @@ func (d Dialect) validate() error {
 	}
 	if (d.lock == nil) != (d.unlock == nil) {
 		return errors.New("ossein migrate: dialect lock and unlock must be configured together")
+	}
+	if d.transactionalLock && d.lock != nil {
+		return errors.New("ossein migrate: dialect cannot combine session and transactional locks")
 	}
 	return nil
 }

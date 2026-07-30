@@ -67,8 +67,9 @@ Today Ossein intentionally stays small:
 - driver-neutral `database/sql` configuration, lifecycle, and DI registration;
 - transactional, dialect-aware SQL migrations with filesystem and embedded
   sources;
-- PostgreSQL advisory locks, MySQL named locks, configurable lock timeouts,
-  and real-database concurrency coverage;
+- PostgreSQL advisory locks, MySQL named locks, SQLite immediate write
+  transactions, configurable lock timeouts, and real-database concurrency
+  coverage;
 - transaction helper with explicit `*sql.Tx`;
 - ordered transactional seeders and `ossein db:seed`;
 - generic test factories with sequences, states, and persistence hooks;
@@ -405,10 +406,9 @@ The core MVP and initial driver-neutral data workflow are complete, including
 and MySQL concurrency protection, seeders, factories, and application-owned
 data commands.
 
-Next steps include a SQLite multi-process migration strategy and database
-adapters, followed by queues and workers, cache drivers, scheduling, events,
-mail, testing helpers, OpenAPI generation, observability, and project
-generators.
+Next steps include database adapters, followed by queues and workers, cache
+drivers, scheduling, events, mail, testing helpers, OpenAPI generation,
+observability, and project generators.
 
 See the [roadmap](docs/ROADMAP.md) for the current direction.
 

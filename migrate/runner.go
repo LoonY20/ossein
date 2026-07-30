@@ -108,6 +108,9 @@ func (r *Runner) Up(ctx context.Context, migrations []Migration, limit int) (cou
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.dialect.transactionalLock {
+		return r.upWithTransactionalLock(ctx, sorted, limit)
+	}
 	conn, release, err := r.acquire(ctx)
 	if err != nil {
 		return 0, err
@@ -161,6 +164,9 @@ func (r *Runner) Down(ctx context.Context, migrations []Migration, steps int) (c
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.dialect.transactionalLock {
+		return r.downWithTransactionalLock(ctx, local, steps)
+	}
 	conn, release, err := r.acquire(ctx)
 	if err != nil {
 		return 0, err
@@ -285,25 +291,14 @@ func (r *Runner) applied(ctx context.Context, connection queryer) ([]AppliedMigr
 }
 
 func (r *Runner) applyUp(ctx context.Context, conn *sql.Conn, migration Migration) error {
-	return r.transaction(ctx, conn, migration, migration.Up, func(tx *sql.Tx) error {
-		query := fmt.Sprintf(
-			"INSERT INTO %s (version, name, applied_at) VALUES (%s, %s, %s)",
-			r.dialect.quote(r.table),
-			r.dialect.placeholder(1), r.dialect.placeholder(2), r.dialect.placeholder(3),
-		)
-		_, err := tx.ExecContext(ctx, query, migration.Version, migration.Name, r.now().UTC().Unix())
-		return err
+	return r.transaction(ctx, conn, migration, func(tx *sql.Tx) error {
+		return r.applyUpOn(ctx, tx, migration)
 	})
 }
 
 func (r *Runner) applyDown(ctx context.Context, conn *sql.Conn, migration Migration) error {
-	return r.transaction(ctx, conn, migration, migration.Down, func(tx *sql.Tx) error {
-		query := fmt.Sprintf(
-			"DELETE FROM %s WHERE version = %s",
-			r.dialect.quote(r.table), r.dialect.placeholder(1),
-		)
-		_, err := tx.ExecContext(ctx, query, migration.Version)
-		return err
+	return r.transaction(ctx, conn, migration, func(tx *sql.Tx) error {
+		return r.applyDownOn(ctx, tx, migration)
 	})
 }
 
@@ -311,8 +306,7 @@ func (r *Runner) transaction(
 	ctx context.Context,
 	conn *sql.Conn,
 	migration Migration,
-	statements []string,
-	record func(*sql.Tx) error,
+	apply func(*sql.Tx) error,
 ) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -324,18 +318,71 @@ func (r *Runner) transaction(
 			_ = tx.Rollback()
 		}
 	}()
-	for _, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("ossein migrate: execute migration %d (%s): %w", migration.Version, migration.Name, err)
-		}
-	}
-	if err := record(tx); err != nil {
-		return fmt.Errorf("ossein migrate: record migration %d: %w", migration.Version, err)
+	if err := apply(tx); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("ossein migrate: commit migration %d: %w", migration.Version, err)
 	}
 	committed = true
+	return nil
+}
+
+type execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func (r *Runner) applyUpOn(ctx context.Context, connection execer, migration Migration) error {
+	if err := executeStatements(ctx, connection, migration, migration.Up); err != nil {
+		return err
+	}
+	query := fmt.Sprintf(
+		"INSERT INTO %s (version, name, applied_at) VALUES (%s, %s, %s)",
+		r.dialect.quote(r.table),
+		r.dialect.placeholder(1), r.dialect.placeholder(2), r.dialect.placeholder(3),
+	)
+	if _, err := connection.ExecContext(
+		ctx,
+		query,
+		migration.Version,
+		migration.Name,
+		r.now().UTC().Unix(),
+	); err != nil {
+		return fmt.Errorf("ossein migrate: record migration %d: %w", migration.Version, err)
+	}
+	return nil
+}
+
+func (r *Runner) applyDownOn(ctx context.Context, connection execer, migration Migration) error {
+	if err := executeStatements(ctx, connection, migration, migration.Down); err != nil {
+		return err
+	}
+	query := fmt.Sprintf(
+		"DELETE FROM %s WHERE version = %s",
+		r.dialect.quote(r.table), r.dialect.placeholder(1),
+	)
+	if _, err := connection.ExecContext(ctx, query, migration.Version); err != nil {
+		return fmt.Errorf("ossein migrate: record migration %d rollback: %w", migration.Version, err)
+	}
+	return nil
+}
+
+func executeStatements(
+	ctx context.Context,
+	connection execer,
+	migration Migration,
+	statements []string,
+) error {
+	for _, statement := range statements {
+		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf(
+				"ossein migrate: execute migration %d (%s): %w",
+				migration.Version,
+				migration.Name,
+				err,
+			)
+		}
+	}
 	return nil
 }
 

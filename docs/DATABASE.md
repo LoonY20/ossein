@@ -136,9 +136,9 @@ read-only transaction is required.
 Connection management is driver-neutral, but migration SQL is not. The
 migration layer uses dialect adapters for PostgreSQL, MySQL, and SQLite instead
 of pretending their DDL and locking behavior are identical. PostgreSQL and
-MySQL migrations use session-level locks to serialize runners across
-processes. Lock waiting is bounded and configurable with
-`migrate.WithLockTimeout`.
+MySQL migrations use session-level locks, while SQLite uses immediate write
+transactions to serialize runners across processes. Lock waiting is bounded
+and configurable with `migrate.WithLockTimeout`.
 
 See [Migrations](MIGRATIONS.md) for the runner and file format.
 

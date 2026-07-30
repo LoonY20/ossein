@@ -9,6 +9,7 @@ import (
 	"io"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,6 +149,9 @@ func TestRunnerRollsBackFailedMigration(t *testing.T) {
 	if len(state.applied) != 0 || len(state.executed) != 0 {
 		t.Fatalf("rollback state: applied=%v executed=%v", state.applied, state.executed)
 	}
+	if state.sqliteRollbacks != 1 {
+		t.Fatalf("sqlite rollbacks = %d", state.sqliteRollbacks)
+	}
 }
 
 func TestRunnerValidation(t *testing.T) {
@@ -236,6 +240,76 @@ func TestMySQLRunnerReportsLockTimeout(t *testing.T) {
 	}
 }
 
+func TestSQLiteRunnerUsesImmediateTransactions(t *testing.T) {
+	state, db := openMigrationDB(t)
+	runner, err := New(db, SQLite(), WithLockTimeout(1500*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations := testMigrations()
+
+	if count, err := runner.Up(context.Background(), migrations, 0); err != nil || count != 2 {
+		t.Fatalf("Up() = %d, %v", count, err)
+	}
+	if count, err := runner.Up(context.Background(), migrations, 0); err != nil || count != 0 {
+		t.Fatalf("idempotent Up() = %d, %v", count, err)
+	}
+	if count, err := runner.Down(context.Background(), migrations, 2); err != nil || count != 2 {
+		t.Fatalf("Down() = %d, %v", count, err)
+	}
+
+	state.mu.Lock()
+	begins := state.sqliteBegins
+	commits := state.sqliteCommits
+	rollbacks := state.sqliteRollbacks
+	busyTimeout := state.sqliteBusyTimeout
+	executed := append([]string(nil), state.executed...)
+	state.mu.Unlock()
+	if begins != 5 || commits != 5 || rollbacks != 0 {
+		t.Fatalf(
+			"sqlite transactions = %d begin, %d commit, %d rollback",
+			begins,
+			commits,
+			rollbacks,
+		)
+	}
+	if busyTimeout != 1500 {
+		t.Fatalf("sqlite busy timeout = %d", busyTimeout)
+	}
+	expected := []string{
+		"CREATE USERS",
+		"CREATE USER INDEX",
+		"ADD EMAIL",
+		"DROP EMAIL",
+		"DROP USERS",
+	}
+	if !reflect.DeepEqual(executed, expected) {
+		t.Fatalf("executed = %#v", executed)
+	}
+}
+
+func TestSQLiteRunnerReportsLockTimeout(t *testing.T) {
+	state, db := openMigrationDB(t)
+	state.sqliteLockError = errors.New("database is locked (5) (SQLITE_BUSY)")
+	runner, err := New(db, SQLite(), WithLockTimeout(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Up(context.Background(), testMigrations(), 1); !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("Up() error = %v, want ErrLockTimeout", err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.sqliteBegins != 1 || state.sqliteCommits != 0 || state.sqliteRollbacks != 0 {
+		t.Fatalf(
+			"sqlite transactions = %d begin, %d commit, %d rollback",
+			state.sqliteBegins,
+			state.sqliteCommits,
+			state.sqliteRollbacks,
+		)
+	}
+}
+
 func TestRunnerDetectsNameAndLocalHistoryMismatch(t *testing.T) {
 	state, db := openMigrationDB(t)
 	state.applied[1] = recordedMigration{name: "old_name", appliedAt: 1}
@@ -275,15 +349,20 @@ type recordedMigration struct {
 }
 
 type migrationDriverState struct {
-	mu              sync.Mutex
-	applied         map[int64]recordedMigration
-	executed        []string
-	failStatement   string
-	locks           int
-	unlocks         int
-	mysqlLockResult int64
-	lockName        string
-	lockTimeout     int64
+	mu                sync.Mutex
+	applied           map[int64]recordedMigration
+	executed          []string
+	failStatement     string
+	locks             int
+	unlocks           int
+	mysqlLockResult   int64
+	lockName          string
+	lockTimeout       int64
+	sqliteLockError   error
+	sqliteBegins      int
+	sqliteCommits     int
+	sqliteRollbacks   int
+	sqliteBusyTimeout int64
 }
 
 type pendingState struct {
@@ -337,6 +416,46 @@ func (c *migrationConnection) ExecContext(
 	normalized := strings.ToUpper(strings.TrimSpace(query))
 	if strings.Contains(normalized, c.state.failStatement) && c.state.failStatement != "" {
 		return nil, errors.New("forced statement failure")
+	}
+
+	switch {
+	case strings.HasPrefix(normalized, "PRAGMA BUSY_TIMEOUT"):
+		fields := strings.Fields(normalized)
+		timeout, err := strconv.ParseInt(fields[len(fields)-1], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		c.state.sqliteBusyTimeout = timeout
+		return driver.RowsAffected(0), nil
+	case normalized == "BEGIN IMMEDIATE":
+		c.state.sqliteBegins++
+		if c.state.sqliteLockError != nil {
+			return nil, c.state.sqliteLockError
+		}
+		if c.pending != nil {
+			return nil, errors.New("transaction already active")
+		}
+		c.pending = &pendingState{
+			applied:  cloneApplied(c.state.applied),
+			executed: append([]string(nil), c.state.executed...),
+		}
+		return driver.RowsAffected(0), nil
+	case normalized == "COMMIT":
+		if c.pending == nil {
+			return nil, errors.New("no transaction active")
+		}
+		c.state.sqliteCommits++
+		c.state.applied = c.pending.applied
+		c.state.executed = c.pending.executed
+		c.pending = nil
+		return driver.RowsAffected(0), nil
+	case normalized == "ROLLBACK":
+		if c.pending == nil {
+			return nil, errors.New("no transaction active")
+		}
+		c.state.sqliteRollbacks++
+		c.pending = nil
+		return driver.RowsAffected(0), nil
 	}
 
 	targetApplied := c.state.applied

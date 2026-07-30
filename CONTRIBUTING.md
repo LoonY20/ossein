@@ -36,9 +36,8 @@ CI requires at least 85% total statement coverage. Coverage is a guardrail, not
 a substitute for behavior-focused tests: prioritize public APIs, concurrency,
 error paths, lifecycle behavior, and generated application workflows.
 
-The PostgreSQL and MySQL integration suites are isolated from the
-dependency-free core in `integration/postgres` and `integration/mysql`. With
-test databases available, run:
+The PostgreSQL, MySQL, and SQLite integration suites are isolated from the
+dependency-free core under `integration`. With test databases available, run:
 
 ```bash
 cd integration/postgres
@@ -46,9 +45,13 @@ OSSEIN_POSTGRES_DSN='postgres://ossein:ossein@127.0.0.1:5432/ossein_test?sslmode
 
 cd ../mysql
 OSSEIN_MYSQL_DSN='ossein:ossein@tcp(127.0.0.1:3306)/ossein_test?parseTime=true' go test -race ./...
+
+cd ../sqlite
+go test -race ./...
 ```
 
-GitHub Actions provisions both database services automatically.
+GitHub Actions provisions the PostgreSQL and MySQL services and runs the
+file-backed SQLite suite automatically.
 
 ## Pull requests
 

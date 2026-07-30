@@ -74,9 +74,10 @@ Goal: offer a coherent database workflow without inventing a mandatory ORM.
 - [x] migration CLI commands
 - [x] PostgreSQL advisory migration lock
 - [x] MySQL distributed migration lock
-- [ ] SQLite multi-process migration strategy
+- [x] SQLite multi-process migration strategy
 - [x] PostgreSQL integration
 - [x] MySQL integration
+- [x] SQLite integration
 - [x] migration workflow foundation
 - [x] seeders
 - [x] factories for tests

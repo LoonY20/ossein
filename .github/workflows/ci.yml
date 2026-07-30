@@ -75,6 +75,10 @@ jobs:
         working-directory: integration/mysql
         run: go test -race ./...
 
+      - name: Test SQLite integration
+        working-directory: integration/sqlite
+        run: go test -race ./...
+
       - name: Enforce coverage
         run: |
           coverage="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"

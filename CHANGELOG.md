@@ -7,6 +7,12 @@ Ossein uses semantic versioning for published releases.
 
 ## [Unreleased]
 
+### Added
+
+- SQLite multi-process migration safety through per-migration
+  `BEGIN IMMEDIATE` transactions and bounded `PRAGMA busy_timeout` waiting
+- real SQLite lock-timeout and concurrent-runner integration tests in CI
+
 ## [0.1.0] - 2026-07-30
 
 The first public release.
