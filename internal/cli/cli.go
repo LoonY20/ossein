@@ -31,7 +31,7 @@ Usage:
 `
 
 // Version is the current Ossein CLI version.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Run executes a CLI command and returns a process exit code.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
