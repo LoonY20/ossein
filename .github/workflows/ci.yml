@@ -64,6 +64,12 @@ jobs:
       - name: Build CLI
         run: go build ./cmd/ossein
 
+      - name: Build database tooling example
+        working-directory: examples/database-tooling
+        run: |
+          go build ./...
+          go vet ./...
+
       - name: Test with race detector
         run: go test -race -coverprofile=coverage.out ./...
 
