@@ -90,10 +90,17 @@ The initial direction is to integrate proven Go database tooling instead of buil
 
 Goal: make Ossein useful for real backend services.
 
+- [ ] panic recovery middleware with structured 500 responses
+- [ ] access-log middleware built on the response status and size tracking
 - [x] cache contract
 - [x] in-memory cache driver
+- [ ] memory cache driver size bounds and amortized expiration sweeping
+- [ ] documented cache semantics for undecodable entries and backend
+      write failures
 - [ ] distributed cache driver
-- [ ] queues and workers
+- [ ] queues and workers with lifecycle-managed graceful shutdown
+- [ ] database-backed queue driver on `database/sql` (`SKIP LOCKED`)
+- [ ] `ossein queue:work` application command
 - [ ] retries and backoff
 - [ ] failed jobs / dead-letter handling
 - [ ] scheduler
@@ -102,14 +109,42 @@ Goal: make Ossein useful for real backend services.
 - [ ] storage adapters
 - [ ] health and readiness endpoints
 
-## Phase 5 — Observability and API Tooling
+Drivers that require third-party clients (Redis and similar) will live in
+separate Go modules inside this repository, following the
+`integration/` precedent. The core module keeps zero third-party runtime
+dependencies; applications pay for a dependency only by importing its driver
+module.
 
+## Phase 5 — Multi-Service Workspaces
+
+Goal: make starting and running several Ossein services as easy as one,
+through code generation and standard-library patterns — not a platform.
+
+- [ ] `ossein new --workspace`: a `go.work` monorepo starter with
+      `services/`, a shared contracts module, Docker Compose, and shared
+      environment files
+- [ ] multi-service `ossein dev`: one supervisor building, running, and
+      hot-reloading every workspace service with prefixed output
+- [ ] typed inter-service HTTP client helpers with timeouts and retries on
+      the standard `http.Client`
+- [ ] outgoing request-ID and trace-context propagation for inter-service
+      calls
+- [ ] transactional outbox helper on top of queues and the existing
+      transaction workflow
+- [ ] multi-service guide: contracts modules, typed clients, outbox, and
+      deployment patterns
+
+The workspace layer is deliberately thin: generated code, `go.work`, and
+`net/http`. Anything that would turn Ossein into a distributed-systems
+platform is a non-goal (see below).
+
+## Phase 6 — Observability and API Tooling
+
+- [ ] testing utilities and HTTP test client with response assertions
 - [ ] OpenAPI generation
 - [ ] metrics
 - [ ] OpenTelemetry integration
 - [ ] profiling helpers
-- [ ] testing utilities
-- [ ] HTTP test client
 - [ ] benchmark suite
 
 ## Non-goals
@@ -120,7 +155,11 @@ Ossein does not aim to:
 - hide `context.Context`, `error`, `http.Handler`, or other fundamental Go concepts;
 - require a custom ORM, logger, database driver, or queue backend;
 - rely heavily on runtime reflection for core behavior;
-- replace the Go standard library where composition is sufficient.
+- replace the Go standard library where composition is sufficient;
+- become a distributed-systems platform: service discovery, an RPC
+  framework, a configuration server, a service mesh, and deployment
+  orchestration are out of scope — multi-service support stays at the level
+  of code generation, shared contracts, and standard-library HTTP.
 
 ## Guiding question
 
