@@ -429,6 +429,7 @@ See the [roadmap](docs/ROADMAP.md) for the current direction.
 - [Seeding](docs/SEEDING.md)
 - [Test factories](docs/FACTORIES.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Field notes: building two applications on Ossein](docs/FIELD_NOTES.md)
 - [Changelog](CHANGELOG.md)
 - [v0.2.0 release notes](docs/releases/v0.2.0.md)
 - [v0.1.0 release notes](docs/releases/v0.1.0.md)
