@@ -12,14 +12,16 @@ The goal is simple: keep the clarity, performance, explicitness, and tooling of 
 
 ## Status
 
-Ossein v0.1.0 is the first public release. It includes the HTTP and
-application core, developer CLI, configuration-aware starter with supervised
-hot reload, route inspection, code generators, driver-neutral migrations with
-PostgreSQL and MySQL concurrency protection, transactions, seeders, and test
-factories.
+Ossein v0.2.0 adds the first production module — a backend-neutral cache
+contract with a hardened in-memory driver and fail-open remember helpers — on
+top of the HTTP core, developer CLI, and driver-neutral data workflow. SQLite
+migrations gained multi-process safety, completing concurrency protection for
+all three dialects, and the experimental `ossein wire` command generates
+explicit service wiring for zero-reflection startup.
 
 The API remains pre-1.0 and is not yet recommended for production systems
-without careful evaluation. Production modules remain part of the roadmap.
+without careful evaluation. Further production modules remain part of the
+roadmap.
 
 ## Philosophy
 
@@ -98,7 +100,7 @@ go install github.com/LoonY20/ossein/cmd/ossein@latest
 For reproducible installation, pin the current release:
 
 ```bash
-go install github.com/LoonY20/ossein/cmd/ossein@v0.1.0
+go install github.com/LoonY20/ossein/cmd/ossein@v0.2.0
 ```
 
 Create and run an application:
@@ -121,7 +123,7 @@ Or add Ossein to an existing module:
 Install the module:
 
 ```bash
-go get github.com/LoonY20/ossein@v0.1.0
+go get github.com/LoonY20/ossein@v0.2.0
 ```
 
 Create an application:
@@ -428,6 +430,7 @@ See the [roadmap](docs/ROADMAP.md) for the current direction.
 - [Test factories](docs/FACTORIES.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Changelog](CHANGELOG.md)
+- [v0.2.0 release notes](docs/releases/v0.2.0.md)
 - [v0.1.0 release notes](docs/releases/v0.1.0.md)
 - [Basic example](examples/basic/main.go)
 - [Complete CRUD example](examples/crud/README.md)

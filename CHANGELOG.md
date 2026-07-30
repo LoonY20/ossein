@@ -7,6 +7,8 @@ Ossein uses semantic versioning for published releases.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-30
+
 ### Added
 
 - backend-neutral `cache.Store` contract with explicit miss, key, and TTL
@@ -71,5 +73,6 @@ The first public release.
 - CI coverage gate requiring at least 85% total statement coverage
 - tests, CI, package documentation, guides, and open-source policies
 
-[Unreleased]: https://github.com/LoonY20/ossein/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LoonY20/ossein/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/LoonY20/ossein/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LoonY20/ossein/releases/tag/v0.1.0
