@@ -23,6 +23,14 @@ Ossein uses semantic versioning for published releases.
   reported instead of returning success for a run that never accepted a
   connection; a graceful shutdown that exceeds its deadline is wrapped so it is
   distinguishable from a bare context error
+- `App.SetNotFoundHandler` and `App.SetMethodNotAllowedHandler`. Unmatched
+  routes and method mismatches are now rendered by the application instead of
+  `ServeMux`, so a JSON API answers them with its own error envelope. The `Allow`
+  header computed by `ServeMux` is preserved, and both fallbacks are ordinary
+  handlers, so a custom `ErrorHandler` applies to them too
+- `ResponseWriterFrom` follows `Unwrap() http.ResponseWriter` chains, the same
+  convention `http.ResponseController` uses, so middleware layered between
+  Ossein and a handler no longer hides the recorded status and size
 
 ### Changed
 

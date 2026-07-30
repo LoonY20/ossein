@@ -57,6 +57,8 @@ Today Ossein intentionally stays small:
 - response status and size tracking through a wrapped `http.ResponseWriter`;
 - validation through an explicit `Validate() error` contract;
 - field-level `ValidationError` responses;
+- JSON `404` and `405` responses with a preserved `Allow` header, replaceable
+  through `SetNotFoundHandler` and `SetMethodNotAllowedHandler`;
 - typed environment configuration with defaults and required values;
 - optional dependency-free `.env` loading with exported-variable precedence;
 - standard-library `log/slog` integration;

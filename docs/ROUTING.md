@@ -38,6 +38,39 @@ Names must be non-empty and unique. Duplicate names panic during application
 setup. Conflicting route patterns are reported as an error by `Start`, `Run`,
 and `RunContext` before the server accepts traffic.
 
+## Unmatched routes and methods
+
+A request that matches no route, or matches a path with a different method, is
+rendered by the application rather than by `ServeMux`, so a JSON API keeps its
+error contract at the edges:
+
+```json
+{"error":{"code":"not_found","message":"The requested resource does not exist"}}
+{"error":{"code":"method_not_allowed","message":"The request method is not supported for this resource"}}
+```
+
+The `Allow` header that `ServeMux` computes is preserved on a `405`. Replace
+either response with an ordinary handler:
+
+```go
+app.SetNotFoundHandler(func(c *ossein.Context) error {
+    return ossein.NotFound("route_missing", "Check the API reference")
+})
+
+app.SetMethodNotAllowedHandler(func(c *ossein.Context) error {
+    c.Logger().Warn("method not allowed", "allow", c.Response.Header().Get("Allow"))
+    return ossein.NewHTTPError(http.StatusMethodNotAllowed, "wrong_method", "See Allow")
+})
+```
+
+Passing `nil` to either restores the default. Both are ordinary handlers, so a
+returned error goes through the application's `ErrorHandler` like any other, and
+an application that customizes its error shape changes these responses with it.
+
+Only genuine routing misses are intercepted. A matched handler that answers
+`404` itself keeps its own response, and the implicit subtree and path-cleaning
+redirects `ServeMux` performs are untouched.
+
 Generate a path with escaped values:
 
 ```go
