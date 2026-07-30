@@ -9,6 +9,20 @@ Ossein uses semantic versioning for published releases.
 
 ### Added
 
+- `App.Serve(ctx, *http.Server)` runs a caller-owned server through the
+  application lifecycle. Timeouts, TLS, `MaxHeaderBytes`, `BaseContext`,
+  `ConnState`, and `ErrorLog` stay as the caller set them; only a nil `Handler`
+  is filled in, so route conflicts still surface as errors rather than panics.
+  A non-nil `TLSConfig` serves HTTPS with certificates from the config.
+
+### Changed
+
+- `Run` and `RunContext` now delegate to `Serve` and build their server with a
+  10s `ReadHeaderTimeout` and a 120s `IdleTimeout`, so an unattended server can
+  no longer be held open indefinitely by connections that never complete a
+  request. `ReadTimeout` and `WriteTimeout` remain unset so that large uploads
+  and server-sent events keep working; use `Serve` to set them.
+
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error
   path reachable from middleware, raw-body and form binding, and atomic cache

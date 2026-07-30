@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// Default timeouts applied to the server Run and RunContext build.
+const (
+	defaultReadHeaderTimeout = 10 * time.Second
+	defaultIdleTimeout       = 120 * time.Second
+)
+
 // Middleware wraps an HTTP handler with additional behavior.
 type Middleware func(http.Handler) http.Handler
 
@@ -280,30 +286,35 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Run starts an HTTP server and blocks until it stops.
+//
+// The server is built by Ossein with conservative timeouts; see Serve to supply
+// a fully configured *http.Server instead.
 func (a *App) Run(address string) error {
-	if err := a.Start(context.Background()); err != nil {
-		return err
-	}
-
-	server := &http.Server{
-		Addr:    address,
-		Handler: a.Handler(),
-	}
-
-	serverErr := server.ListenAndServe()
-	if errors.Is(serverErr, http.ErrServerClosed) {
-		serverErr = nil
-	}
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
-	defer cancel()
-	stopErr := a.Stop(stopCtx)
-
-	return errors.Join(serverErr, stopErr)
+	return a.Serve(context.Background(), a.newDefaultServer(address))
 }
 
 // RunContext starts an HTTP server and gracefully shuts it down when ctx is cancelled.
 func (a *App) RunContext(ctx context.Context, address string) error {
+	return a.Serve(ctx, a.newDefaultServer(address))
+}
+
+// Serve runs a caller-owned *http.Server through Ossein's application
+// lifecycle: it validates services and runs start hooks, serves until the
+// server stops or ctx is cancelled, shuts the server down gracefully, and then
+// runs stop hooks.
+//
+// Every server field is left as the caller set it, so timeouts, TLS,
+// MaxHeaderBytes, BaseContext, ConnState, and ErrorLog are all available. Only
+// Handler is filled in, and only when nil, so that route conflicts surface as
+// Serve errors instead of panics. A non-nil TLSConfig selects HTTPS, with
+// certificates taken from the config rather than from file paths.
+//
+// Serve is the escape hatch for production servers; Run and RunContext are
+// shorthand for the common case.
+func (a *App) Serve(ctx context.Context, server *http.Server) error {
+	if server == nil {
+		return errors.New("ossein: server cannot be nil")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -311,19 +322,16 @@ func (a *App) RunContext(ctx context.Context, address string) error {
 	if err := a.Start(ctx); err != nil {
 		return err
 	}
-
-	server := &http.Server{
-		Addr:    address,
-		Handler: a.Handler(),
+	if server.Handler == nil {
+		server.Handler = a.Handler()
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- server.ListenAndServe()
+		errCh <- listenAndServe(server)
 	}()
 
 	var serverErr error
-
 	select {
 	case serverErr = <-errCh:
 	case <-ctx.Done():
@@ -346,4 +354,31 @@ func (a *App) RunContext(ctx context.Context, address string) error {
 	stopErr := a.Stop(stopCtx)
 
 	return errors.Join(serverErr, stopErr)
+}
+
+// newDefaultServer builds the server used by Run and RunContext.
+//
+// ReadHeaderTimeout and IdleTimeout bound connections that never send a
+// complete request, which is what makes an unattended server safe to expose.
+// ReadTimeout and WriteTimeout are deliberately left unset: a WriteTimeout
+// would cap server-sent events and long downloads, and a ReadTimeout would cap
+// large uploads. Applications that want them should use Serve.
+//
+// Handler stays nil so Serve installs it after Start, keeping route conflicts
+// reportable as errors.
+func (a *App) newDefaultServer(address string) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		IdleTimeout:       defaultIdleTimeout,
+	}
+}
+
+// listenAndServe selects HTTPS when the caller configured TLS. Certificates
+// come from server.TLSConfig, so no file paths are needed.
+func listenAndServe(server *http.Server) error {
+	if server.TLSConfig != nil {
+		return server.ListenAndServeTLS("", "")
+	}
+	return server.ListenAndServe()
 }

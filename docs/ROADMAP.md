@@ -42,10 +42,12 @@ The following gaps were found by building two applications on 0.2.0; see
 gaps rather than new modules: in each case the framework's own contract —
 structured JSON errors, an owned server lifecycle — does not currently hold.
 
-- [ ] configurable `http.Server`: timeouts, TLS, header and body limits,
-      `BaseContext`, and `ErrorLog`, through an option or `App.Serve`
-- [ ] safe default timeouts in `Run`/`RunContext` (today: none, and the
-      generated starter inherits that)
+- [x] configurable `http.Server` through `App.Serve`: timeouts, TLS, header
+      limits, `BaseContext`, and `ErrorLog` stay owned by the caller while
+      Ossein runs the lifecycle
+- [x] safe default timeouts in `Run`/`RunContext`: `ReadHeaderTimeout` and
+      `IdleTimeout` bound half-open connections, while `ReadTimeout` and
+      `WriteTimeout` stay unset so uploads and streaming keep working
 - [ ] customizable `404` and `405` responses rendered through the error
       handler, preserving `Allow` (today: `text/plain` from `ServeMux`)
 - [ ] an error path reachable from middleware: exported error envelope and a
