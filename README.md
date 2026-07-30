@@ -74,6 +74,8 @@ Today Ossein intentionally stays small:
 - ordered transactional seeders and `ossein db:seed`;
 - generic test factories with sequences, states, and persistence hooks;
 - composed application command handling for migrations and seeders;
+- backend-neutral cache contract, concurrency-safe in-memory driver, and typed
+  JSON/remember helpers;
 - JSON response helpers;
 - blocking server start with `Run`;
 - context-aware graceful shutdown with `RunContext`;
@@ -403,11 +405,12 @@ It is **not** intended to be Laravel reimplemented in Go. The inspiration is Lar
 
 The core MVP and initial driver-neutral data workflow are complete, including
 `database/sql` connection management, dialect-aware migrations, PostgreSQL
-and MySQL concurrency protection, seeders, factories, and application-owned
-data commands.
+MySQL, and SQLite concurrency protection, seeders, factories, and
+application-owned data commands. The first production module now provides a
+cache contract and process-local memory driver.
 
-Next steps include database adapters, followed by queues and workers, cache
-drivers, scheduling, events, mail, testing helpers, OpenAPI generation,
+Next steps include database adapters, a distributed cache driver, queues and
+workers, scheduling, events, mail, testing helpers, OpenAPI generation,
 observability, and project generators.
 
 See the [roadmap](docs/ROADMAP.md) for the current direction.
@@ -418,6 +421,7 @@ See the [roadmap](docs/ROADMAP.md) for the current direction.
 - [Routing and named routes](docs/ROUTING.md)
 - [CLI and generators](docs/CLI.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Cache](docs/CACHE.md)
 - [Database](docs/DATABASE.md)
 - [Migrations](docs/MIGRATIONS.md)
 - [Seeding](docs/SEEDING.md)

@@ -11,7 +11,8 @@ Application
 ├── slog request context
 ├── typed environment configuration
 ├── lifecycle
-└── constructor-based service container
+├── constructor-based service container
+└── optional database, migration, seeding, factory, and cache packages
 ```
 
 The framework does not replace `context.Context`, `error`, `http.Handler`,
