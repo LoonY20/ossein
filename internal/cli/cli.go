@@ -23,6 +23,7 @@ Usage:
   ossein migrate:rollback [--steps N] Roll back migrations
   ossein migrate:status              Show migration status
   ossein db:seed                     Run application seeders
+  ossein wire                        Generate explicit service wiring
   ossein make:controller <name>      Generate a controller
   ossein make:middleware <name>      Generate middleware
   ossein make:request <name>         Generate a request type
@@ -79,7 +80,7 @@ func run(
 		return executeDev(ctx, stdin, stdout, stderr)
 	case "routes":
 		return executeGoCommand([]string{"run", "./cmd/server", "routes"}, stdin, stdout, stderr)
-	case "migrate", "migrate:rollback", "migrate:status", "db:seed":
+	case "migrate", "migrate:rollback", "migrate:status", "db:seed", "wire":
 		commandArgs := append([]string{"run", "./cmd/server"}, args...)
 		return executeGoCommand(commandArgs, stdin, stdout, stderr)
 	case "make:controller", "make:middleware", "make:request":
@@ -274,6 +275,12 @@ func main() {
 				fmt.Fprintf(writer, "%s\t%s\t%s\n", route.Method, route.Pattern, route.Name)
 			}
 			_ = writer.Flush()
+			return
+		case "wire":
+			if err := ossein.WriteWiringFile(app, "internal/wiring/wiring_gen.go", "wiring"); err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println("Created internal/wiring/wiring_gen.go")
 			return
 		default:
 			log.Fatalf("unknown application command %q", os.Args[1])

@@ -136,6 +136,50 @@ func TestGeneratedProjectBuildsAndListsRoutes(t *testing.T) {
 	}
 }
 
+func TestGeneratedProjectWiresServices(t *testing.T) {
+	packageDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	moduleRoot, err := filepath.Abs(filepath.Join(packageDir, "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	withinTempDir(t)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"new", "demo"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("new Run() = %d, stderr = %s", code, stderr.String())
+	}
+
+	projectDir, err := filepath.Abs("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGoTool(t, projectDir, "mod", "edit", "-require=github.com/LoonY20/ossein@v0.0.0")
+	runGoTool(t, projectDir, "mod", "edit", "-replace=github.com/LoonY20/ossein="+moduleRoot)
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"wire"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("wire Run() = %d, stderr = %s", code, stderr.String())
+	}
+
+	generated, err := os.ReadFile(filepath.Join("internal", "wiring", "wiring_gen.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(generated), "package wiring") {
+		t.Fatalf("generated wiring = %s", generated)
+	}
+
+	// The project must still compile with the generated file in the tree.
+	runGoTool(t, projectDir, "build", "./...")
+}
+
 func TestCommandValidationAndMetadata(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"wat"}, strings.NewReader(""), &stdout, &stderr); code != 2 {
@@ -182,6 +226,7 @@ func TestApplicationCommandsAreForwarded(t *testing.T) {
 		{"migrate:rollback", "--steps=3"},
 		{"migrate:status"},
 		{"db:seed"},
+		{"wire"},
 	}
 	for _, args := range tests {
 		captured = nil

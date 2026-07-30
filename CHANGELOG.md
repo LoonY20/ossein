@@ -23,6 +23,11 @@ Ossein uses semantic versioning for published releases.
 - real SQLite lock-timeout and concurrent-runner integration tests in CI
 - documented sqlx, sqlc, and native pgx integration patterns with a
   CI-compiled database tooling example
+- `ossein wire`: generated explicit service wiring (`GenerateWiring`,
+  `WriteWiringFile`) that builds a `Services` struct with constructor calls in
+  dependency order for zero-reflection startup; deterministic, gofmt-formatted
+  output with strict diagnostics for closures, methods, generics, unexported
+  symbols, and package-main registrations
 
 ## [0.1.0] - 2026-07-30
 
