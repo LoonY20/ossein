@@ -50,7 +50,8 @@ Goal: provide the Laravel-like productivity layer while keeping generated code o
 - [x] singleton and transient lifetimes
 - [x] missing-dependency validation
 - [x] circular-dependency detection
-- [x] optional code-generation strategy for dependency wiring (`ossein wire`)
+- [x] optional code-generation strategy for dependency wiring
+      (`ossein wire`, experimental until validated by real applications)
 - [x] `ossein new`
 - [x] `ossein dev`
 - [x] `ossein routes`

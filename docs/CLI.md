@@ -65,6 +65,11 @@ removing the temporary binary.
 
 ## Generated service wiring
 
+> **Experimental.** The `ossein wire` command, the `GenerateWiring` and
+> `WriteWiringFile` APIs, and the shape of the generated code may change or be
+> removed before the first stable release, depending on real-world feedback.
+> The service container remains the default and fully supported path.
+
 `ossein wire` is an application command like `migrate`: it runs the
 application's normal service registrations, then writes
 `internal/wiring/wiring_gen.go` with explicit constructor calls in dependency
