@@ -140,8 +140,9 @@ Goal: make Ossein useful for real backend services.
       write failures
 - [ ] optional atomic cache capability interfaces — needed for idempotency
       keys, where `Get`-then-`Set` is racy by construction
-- [ ] lifecycle-managed cleanup for the memory driver: expired entries that are
-      written once and never read again are never swept
+- [ ] lifecycle-managed cleanup for the memory driver: sampled reclamation is
+      driven by traffic, so a process idle after a burst holds expired entries
+      until its next write
 - [ ] distributed cache driver
 - [ ] queues and workers with lifecycle-managed graceful shutdown
 - [ ] database-backed queue driver on `database/sql` (`SKIP LOCKED`)

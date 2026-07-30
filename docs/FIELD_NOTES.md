@@ -253,17 +253,26 @@ that the memory driver implements under its existing lock, plus a
 `cache.Claim(ctx, store, key, ttl) (bool, error)` helper that falls back to
 Get-then-Set and documents the weaker guarantee.
 
-### 13. The memory cache never evicts write-only keys
+### 13. The memory cache has no bound on resident size
 
-Expired entries are swept opportunistically on reads and writes. Idempotency
-keys are written once, live 24 hours, and are never read again, so under steady
-traffic nothing triggers a sweep of them and the map grows with delivery volume.
-hooksink wires a `PurgeExpired` ticker into the lifecycle by hand.
+Write-only keys *are* reclaimed: `Set` calls `purgeSampleLocked` on every write
+(`cache/memory.go:104`), which walks up to 16 entries from the front of a
+round-robin order list, dropping expired ones and rotating live ones to the back.
+So the driver does not leak — an earlier draft of this note claimed it did, and
+that was wrong.
 
-**Proposal.** An opt-in janitor tied to the app lifecycle
-(`cache.RegisterMemory(app, …)`), and the already-planned size bound with an
-eviction policy — the two together turn the driver from "cache for reads" into
-something usable for write-mostly keys.
+The real limitation is that reclamation is rate-bounded (16 entries per
+operation) and driven by traffic, while nothing caps resident size. With
+24-hour idempotency keys, steady-state memory is governed by TTL times arrival
+rate, so a delivery burst is held in full until the TTLs elapse, and a process
+that goes idle after a burst holds everything until the next write. hooksink
+wires a `PurgeExpired` ticker into the lifecycle to cover the idle case.
+
+**Proposal.** The already-planned size bound with an eviction policy is the
+substantive fix; it is what turns "does not leak" into "cannot exceed a
+configured budget". An opt-in lifecycle janitor
+(`cache.RegisterMemory(app, …)`) additionally covers the idle-after-burst case
+without every application writing its own ticker.
 
 ### 14. Background work cannot inherit request identity
 
