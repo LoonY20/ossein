@@ -11,9 +11,13 @@ Ossein uses semantic versioning for published releases.
 
 - backend-neutral `cache.Store` contract with explicit miss, key, and TTL
   errors
-- concurrency-safe in-memory cache driver with lazy TTL expiration and value
+- concurrency-safe in-memory cache driver with concurrent reads, bounded
+  round-robin TTL cleanup on reads and writes, explicit full cleanup, and value
   copy isolation
-- typed JSON and remember-on-miss cache helpers
+- typed JSON and fail-open remember helpers with self-healing decode failures,
+  strict encoding errors, and optional cache-error observation
+- defined cache buffer ownership and a forward-compatible strategy for
+  optional atomic backend capabilities
 - SQLite multi-process migration safety through per-migration
   `BEGIN IMMEDIATE` transactions and bounded `PRAGMA busy_timeout` waiting
 - real SQLite lock-timeout and concurrent-runner integration tests in CI
