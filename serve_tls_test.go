@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,54 +57,31 @@ func selfSignedTLSConfig(t *testing.T) (*tls.Config, *x509.CertPool) {
 	}, pool
 }
 
-// TestServeUsesTLSWhenConfigured proves Serve honors a caller's TLSConfig, which
-// is the only way an application can terminate HTTPS through the framework.
-func TestServeUsesTLSWhenConfigured(t *testing.T) {
+// TestServeListenerServesHTTPSThroughTLSListener shows how an application
+// terminates HTTPS: wrap the listener with crypto/tls. No Ossein API is needed
+// beyond ServeListener, and nothing about the protocol is inferred.
+func TestServeListenerServesHTTPSThroughTLSListener(t *testing.T) {
 	app := New(WithShutdownTimeout(time.Second))
 	app.Get("/secure", func(c *Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"scheme": "https"})
 	})
 
 	tlsConfig, pool := selfSignedTLSConfig(t)
-
-	// Reserve a port, then hand the address to Serve.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
-	}
+	listener := tls.NewListener(newLocalListener(t), tlsConfig)
 	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatalf("release port: %v", err)
-	}
 
-	server := &http.Server{Addr: address, TLSConfig: tlsConfig}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	result := make(chan error, 1)
 	go func() {
-		result <- app.Serve(ctx, server)
+		result <- app.ServeListener(ctx, &http.Server{}, listener)
 	}()
 
 	client := &http.Client{
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
 		Timeout:   5 * time.Second,
 	}
-
-	var response *http.Response
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		response, err = client.Get("https://" + address + "/secure")
-		if err == nil {
-			break
-		}
-		select {
-		case serveErr := <-result:
-			t.Fatalf("Serve() returned early: %v", serveErr)
-		default:
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	response, err := client.Get("https://" + address + "/secure")
 	if err != nil {
 		t.Fatalf("HTTPS request failed: %v", err)
 	}
@@ -124,9 +102,138 @@ func TestServeUsesTLSWhenConfigured(t *testing.T) {
 	select {
 	case err := <-result:
 		if err != nil {
-			t.Fatalf("Serve() error = %v", err)
+			t.Fatalf("ServeListener() error = %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Serve did not return after cancellation")
+		t.Fatal("ServeListener did not return after cancellation")
+	}
+}
+
+// TestServeDoesNotInferTLSFromTLSConfig pins a deliberate choice: the protocol
+// follows the method called, exactly as in net/http. Setting TLSConfig only to
+// raise MinVersion must not silently turn a plain server into an HTTPS one.
+func TestServeDoesNotInferTLSFromTLSConfig(t *testing.T) {
+	app := New(WithShutdownTimeout(time.Second))
+	app.Get("/plain", func(c *Context) error {
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	listener := newLocalListener(t)
+	server := &http.Server{TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- app.ServeListener(ctx, server, listener)
+	}()
+
+	response, err := http.Get("http://" + listener.Addr().String() + "/plain")
+	if err != nil {
+		t.Fatalf("plain HTTP request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 over plain HTTP", response.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("ServeListener() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeListener did not return")
+	}
+}
+
+// TestServeTLSRequiresCertificates pins a comprehensible error. Left to the
+// standard library, empty file paths surface as `open : no such file`, which
+// says nothing about certificates.
+func TestServeTLSRequiresCertificates(t *testing.T) {
+	app := New()
+	stopped := false
+	app.OnStop(func(context.Context) error {
+		stopped = true
+		return nil
+	})
+
+	err := app.ServeTLS(context.Background(), &http.Server{Addr: "127.0.0.1:0"}, "", "")
+	if err == nil {
+		t.Fatal("expected an error when no certificate is available")
+	}
+	if !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("error = %v, want it to mention certificates", err)
+	}
+	if !strings.Contains(err.Error(), "ossein") {
+		t.Fatalf("error = %v, want it attributed to ossein", err)
+	}
+	if stopped {
+		t.Fatal("stop hooks must not run when the request is rejected up front")
+	}
+}
+
+// TestServeTLSUsesTLSConfigCertificates covers the Addr-based HTTPS path with
+// certificates supplied through TLSConfig rather than files.
+func TestServeTLSUsesTLSConfigCertificates(t *testing.T) {
+	app := New(WithShutdownTimeout(time.Second))
+	app.Get("/secure", func(c *Context) error {
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	tlsConfig, pool := selfSignedTLSConfig(t)
+
+	// Reserve an address, release it, and hand it to ServeTLS. Serve binds by
+	// address here, so a brief window exists; the request loop tolerates it.
+	probe := newLocalListener(t)
+	address := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatalf("release port: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- app.ServeTLS(ctx, &http.Server{Addr: address, TLSConfig: tlsConfig}, "", "")
+	}()
+
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
+		Timeout:   5 * time.Second,
+	}
+
+	var response *http.Response
+	var err error
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err = client.Get("https://" + address + "/secure")
+		if err == nil {
+			break
+		}
+		select {
+		case serveErr := <-result:
+			t.Fatalf("ServeTLS returned early: %v", serveErr)
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("HTTPS request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("ServeTLS() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeTLS did not return")
 	}
 }

@@ -42,9 +42,10 @@ The following gaps were found by building two applications on 0.2.0; see
 gaps rather than new modules: in each case the framework's own contract —
 structured JSON errors, an owned server lifecycle — does not currently hold.
 
-- [x] configurable `http.Server` through `App.Serve`: timeouts, TLS, header
-      limits, `BaseContext`, and `ErrorLog` stay owned by the caller while
-      Ossein runs the lifecycle
+- [x] configurable `http.Server` through `App.Serve`, `App.ServeTLS`, and
+      `App.ServeListener`: timeouts, TLS, header limits, `BaseContext`, and
+      `ErrorLog` stay owned by the caller while Ossein runs the lifecycle,
+      including socket activation and TLS composed with `tls.NewListener`
 - [x] safe default timeouts in `Run`/`RunContext`: `ReadHeaderTimeout` and
       `IdleTimeout` bound half-open connections, while `ReadTimeout` and
       `WriteTimeout` stay unset so uploads and streaming keep working

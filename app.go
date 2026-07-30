@@ -2,9 +2,11 @@ package ossein
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -303,11 +305,19 @@ func (a *App) RunContext(ctx context.Context, address string) error {
 // server stops or ctx is cancelled, shuts the server down gracefully, and then
 // runs stop hooks.
 //
-// Every server field is left as the caller set it, so timeouts, TLS,
-// MaxHeaderBytes, BaseContext, ConnState, and ErrorLog are all available. Only
-// Handler is filled in, and only when nil, so that route conflicts surface as
-// Serve errors instead of panics. A non-nil TLSConfig selects HTTPS, with
-// certificates taken from the config rather than from file paths.
+// Every server field is left as the caller set it, so timeouts, MaxHeaderBytes,
+// BaseContext, ConnState, and ErrorLog are all available. Only Handler is
+// filled in, and only when nil; Serve then owns it for the lifetime of the
+// server. Installing it after start hooks keeps route conflicts reportable as
+// errors instead of panics.
+//
+// Serve always speaks plain HTTP, matching http.Server.ListenAndServe: a
+// TLSConfig alone does not select HTTPS. Use ServeTLS, or wrap a listener with
+// tls.NewListener and pass it to ServeListener.
+//
+// A single server may be served once. Serving an already-closed server reports
+// http.ErrServerClosed rather than reporting success for a run that never
+// accepted a connection.
 //
 // Serve is the escape hatch for production servers; Run and RunContext are
 // shorthand for the common case.
@@ -315,8 +325,68 @@ func (a *App) Serve(ctx context.Context, server *http.Server) error {
 	if server == nil {
 		return errors.New("ossein: server cannot be nil")
 	}
+	return a.serve(ctx, server, server.ListenAndServe)
+}
+
+// ServeTLS is Serve over HTTPS. Certificates come from certFile and keyFile, or
+// from server.TLSConfig when both paths are empty, exactly as
+// http.Server.ListenAndServeTLS behaves.
+//
+// A missing certificate is reported before the lifecycle starts, because the
+// standard library would otherwise fail with `open :` and no mention of TLS.
+func (a *App) ServeTLS(ctx context.Context, server *http.Server, certFile, keyFile string) error {
+	if server == nil {
+		return errors.New("ossein: server cannot be nil")
+	}
+	if certFile == "" && keyFile == "" && !hasCertificateSource(server.TLSConfig) {
+		return errors.New(
+			"ossein: ServeTLS needs a certificate: pass certFile and keyFile, " +
+				"or set Certificates, GetCertificate, or GetConfigForClient on server.TLSConfig",
+		)
+	}
+	return a.serve(ctx, server, func() error {
+		return server.ListenAndServeTLS(certFile, keyFile)
+	})
+}
+
+// hasCertificateSource reports whether a TLS config can produce a certificate
+// without reading files.
+func hasCertificateSource(config *tls.Config) bool {
+	if config == nil {
+		return false
+	}
+	return len(config.Certificates) > 0 ||
+		config.GetCertificate != nil ||
+		config.GetConfigForClient != nil
+}
+
+// ServeListener is Serve on an already-bound net.Listener, for socket
+// activation, an ephemeral test port, or a listener wrapped with tls.NewListener.
+// server.Addr is ignored.
+func (a *App) ServeListener(
+	ctx context.Context,
+	server *http.Server,
+	listener net.Listener,
+) error {
+	if server == nil {
+		return errors.New("ossein: server cannot be nil")
+	}
+	if listener == nil {
+		return errors.New("ossein: listener cannot be nil")
+	}
+	return a.serve(ctx, server, func() error { return server.Serve(listener) })
+}
+
+// serve is the shared lifecycle around every server entry point. listen blocks
+// until the server stops.
+func (a *App) serve(ctx context.Context, server *http.Server, listen func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// A cancelled context would otherwise run both hook sets and report a clean
+	// run for a server that never listened.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if err := a.Start(ctx); err != nil {
@@ -328,25 +398,32 @@ func (a *App) Serve(ctx context.Context, server *http.Server) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- listenAndServe(server)
+		errCh <- listen()
 	}()
 
 	var serverErr error
 	select {
 	case serverErr = <-errCh:
+		// The server stopped on its own. ErrServerClosed here means something
+		// other than this call closed it, so it is reported rather than
+		// mistaken for a graceful shutdown.
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
 		shutdownErr := server.Shutdown(shutdownCtx)
 		cancel()
-		if shutdownErr != nil {
-			serverErr = shutdownErr
-		} else {
-			serverErr = <-errCh
-		}
-	}
 
-	if errors.Is(serverErr, http.ErrServerClosed) {
-		serverErr = nil
+		// Shutdown closes listeners before waiting on connections, so listen
+		// has returned even when the wait timed out.
+		serverErr = <-errCh
+		if errors.Is(serverErr, http.ErrServerClosed) {
+			serverErr = nil
+		}
+		if shutdownErr != nil {
+			serverErr = errors.Join(
+				fmt.Errorf("ossein: graceful shutdown: %w", shutdownErr),
+				serverErr,
+			)
+		}
 	}
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
@@ -359,10 +436,14 @@ func (a *App) Serve(ctx context.Context, server *http.Server) error {
 // newDefaultServer builds the server used by Run and RunContext.
 //
 // ReadHeaderTimeout and IdleTimeout bound connections that never send a
-// complete request, which is what makes an unattended server safe to expose.
-// ReadTimeout and WriteTimeout are deliberately left unset: a WriteTimeout
-// would cap server-sent events and long downloads, and a ReadTimeout would cap
-// large uploads. Applications that want them should use Serve.
+// complete request header and connections kept alive without further requests,
+// which is what makes an unattended server safe to expose. They do not bound a
+// slowly delivered request body; an application that needs that should set
+// ReadTimeout through Serve.
+//
+// ReadTimeout and WriteTimeout are deliberately left unset: WriteTimeout is an
+// absolute deadline for the whole response, so it would cut off server-sent
+// events and long downloads, and ReadTimeout would cap large uploads.
 //
 // Handler stays nil so Serve installs it after Start, keeping route conflicts
 // reportable as errors.
@@ -372,13 +453,4 @@ func (a *App) newDefaultServer(address string) *http.Server {
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
 		IdleTimeout:       defaultIdleTimeout,
 	}
-}
-
-// listenAndServe selects HTTPS when the caller configured TLS. Certificates
-// come from server.TLSConfig, so no file paths are needed.
-func listenAndServe(server *http.Server) error {
-	if server.TLSConfig != nil {
-		return server.ListenAndServeTLS("", "")
-	}
-	return server.ListenAndServe()
 }

@@ -71,12 +71,16 @@ a framework default of "no timeouts" is not a safe default.
 
 **Resolution.** `App.Serve(ctx, *http.Server)` now runs a caller-owned server
 through the full lifecycle, leaving every field except a nil `Handler`
-untouched, and serving HTTPS when `TLSConfig` is set. `Run` and `RunContext`
-delegate to it and supply `ReadHeaderTimeout` and `IdleTimeout`; `ReadTimeout`
-and `WriteTimeout` stay unset on purpose, because a write deadline would cut off
-the server-sent events this framework otherwise supports. Rewriting both
-services against it removed the hand-rolled lifecycle block — linkr's `main.go`
-went from 100 lines to 52.
+untouched, with `ServeTLS` and `ServeListener` covering HTTPS and already-bound
+listeners. The protocol follows the method called, as in `net/http`: an
+inference from `TLSConfig` was considered and rejected, because setting it only
+to raise `MinVersion` would then silently switch a server to HTTPS.
+
+`Run` and `RunContext` delegate to `Serve` and supply `ReadHeaderTimeout` and
+`IdleTimeout`; `ReadTimeout` and `WriteTimeout` stay unset on purpose, because a
+write deadline would cut off the server-sent events this framework otherwise
+supports. Rewriting both services against it removed the hand-rolled lifecycle
+block — linkr's `main.go` went from 100 lines to 52.
 
 ### 2. `404` and `405` bodies are neither JSON nor customizable
 

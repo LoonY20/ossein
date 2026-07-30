@@ -10,10 +10,19 @@ Ossein uses semantic versioning for published releases.
 ### Added
 
 - `App.Serve(ctx, *http.Server)` runs a caller-owned server through the
-  application lifecycle. Timeouts, TLS, `MaxHeaderBytes`, `BaseContext`,
-  `ConnState`, and `ErrorLog` stay as the caller set them; only a nil `Handler`
-  is filled in, so route conflicts still surface as errors rather than panics.
-  A non-nil `TLSConfig` serves HTTPS with certificates from the config.
+  application lifecycle. Timeouts, `MaxHeaderBytes`, `BaseContext`, `ConnState`,
+  and `ErrorLog` stay as the caller set them; only a nil `Handler` is filled in,
+  and only after start hooks, so route conflicts still surface as errors rather
+  than panics
+- `App.ServeTLS` and `App.ServeListener` for HTTPS and for an already-bound
+  `net.Listener` (socket activation, ephemeral test ports, or TLS composed with
+  `tls.NewListener`). As in `net/http`, the protocol follows the method called:
+  a `TLSConfig` alone never promotes a plain server to HTTPS. `ServeTLS` reports
+  a missing certificate up front instead of failing with `open :`
+- an already-cancelled context, or a server that was already closed, is now
+  reported instead of returning success for a run that never accepted a
+  connection; a graceful shutdown that exceeds its deadline is wrapped so it is
+  distinguishable from a bare context error
 
 ### Changed
 
