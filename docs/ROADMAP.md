@@ -94,9 +94,11 @@ Goal: make Ossein useful for real backend services.
 - [ ] access-log middleware built on the response status and size tracking
 - [x] cache contract
 - [x] in-memory cache driver
-- [ ] memory cache driver size bounds and amortized expiration sweeping
-- [ ] documented cache semantics for undecodable entries and backend
+- [x] memory cache driver amortized expiration sweeping
+- [ ] memory cache driver configurable size bounds and eviction policy
+- [x] documented cache semantics for undecodable entries and backend
       write failures
+- [ ] optional atomic cache capability interfaces
 - [ ] distributed cache driver
 - [ ] queues and workers with lifecycle-managed graceful shutdown
 - [ ] database-backed queue driver on `database/sql` (`SKIP LOCKED`)

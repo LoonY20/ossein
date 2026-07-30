@@ -62,11 +62,151 @@ func TestMemoryExpiration(t *testing.T) {
 		t.Fatalf("Get() at expiration = %v, want ErrMiss", err)
 	}
 
-	store.mu.Lock()
+	store.mu.RLock()
 	entries := len(store.entries)
-	store.mu.Unlock()
+	store.mu.RUnlock()
 	if entries != 0 {
 		t.Fatalf("expired entries = %d, want 0", entries)
+	}
+}
+
+func TestMemorySetAmortizesExpiredEntryCleanup(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := NewMemory()
+	store.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	expiredCount := memoryCleanupSampleSize * 4
+	for index := range expiredCount {
+		key := fmt.Sprintf("expired:%d", index)
+		if err := store.Set(ctx, key, []byte("value"), time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(time.Minute)
+
+	writes := expiredCount / memoryCleanupSampleSize
+	for index := range writes {
+		key := fmt.Sprintf("live:%d", index)
+		if err := store.Set(ctx, key, []byte("value"), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store.mu.RLock()
+	entries := len(store.entries)
+	orderEntries := store.order.Len()
+	store.mu.RUnlock()
+	if entries != writes || orderEntries != writes {
+		t.Fatalf(
+			"entries after amortized cleanup = map:%d order:%d, want %d",
+			entries,
+			orderEntries,
+			writes,
+		)
+	}
+}
+
+func TestMemoryReadsClockWhileHoldingEntryLock(t *testing.T) {
+	expiry := time.Unix(1_700_000_000, 0)
+
+	for _, test := range []struct {
+		name string
+		run  func(*Memory) error
+	}{
+		{
+			name: "Get",
+			run: func(store *Memory) error {
+				_, err := store.Get(context.Background(), "key")
+				return err
+			},
+		},
+		{
+			name: "PurgeExpired",
+			run: func(store *Memory) error {
+				if removed := store.PurgeExpired(); removed != 1 {
+					return fmt.Errorf("PurgeExpired() = %d, want 1", removed)
+				}
+				return nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewMemory()
+			store.mu.Lock()
+			element := store.order.PushBack("key")
+			store.entries["key"] = memoryEntry{
+				value:        []byte("expired"),
+				expiresAt:    expiry,
+				orderElement: element,
+			}
+			store.mu.Unlock()
+			store.now = func() time.Time {
+				if store.mu.TryLock() {
+					store.mu.Unlock()
+					t.Error("currentTime() called without holding an entry lock")
+				}
+				return expiry
+			}
+
+			err := test.run(store)
+			if test.name == "Get" && !errors.Is(err, ErrMiss) {
+				t.Fatalf("Get() = %v, want ErrMiss", err)
+			}
+			if test.name != "Get" && err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestMemoryPurgeExpired(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := NewMemory()
+	store.now = func() time.Time { return now }
+	ctx := context.Background()
+	if err := store.Set(ctx, "expired", []byte("old"), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set(ctx, "live", []byte("current"), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(time.Minute)
+	if removed := store.PurgeExpired(); removed != 1 {
+		t.Fatalf("PurgeExpired() = %d, want 1", removed)
+	}
+	if removed := store.PurgeExpired(); removed != 0 {
+		t.Fatalf("second PurgeExpired() = %d, want 0", removed)
+	}
+	if value, err := store.Get(ctx, "live"); err != nil || string(value) != "current" {
+		t.Fatalf("Get(live) = %q, %v", value, err)
+	}
+}
+
+func TestMemoryExpiredReadAlsoAmortizesCleanup(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := NewMemory()
+	store.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	for index := range memoryCleanupSampleSize + 1 {
+		key := fmt.Sprintf("expired:%d", index)
+		if err := store.Set(ctx, key, []byte("value"), time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(time.Minute)
+
+	if _, err := store.Get(ctx, "expired:0"); !errors.Is(err, ErrMiss) {
+		t.Fatalf("Get() = %v, want ErrMiss", err)
+	}
+	store.mu.RLock()
+	entries := len(store.entries)
+	orderEntries := store.order.Len()
+	store.mu.RUnlock()
+	if entries != 0 || orderEntries != 0 {
+		t.Fatalf("entries after expired read = map:%d order:%d, want 0", entries, orderEntries)
 	}
 }
 
@@ -130,4 +270,61 @@ func TestMemoryConcurrentAccess(t *testing.T) {
 		}(worker)
 	}
 	wait.Wait()
+}
+
+func TestMemoryConcurrentExpirationAndRefresh(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := NewMemory()
+	store.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	for iteration := range 1_000 {
+		now = time.Unix(1_700_000_000+int64(iteration), 0)
+		if err := store.Set(ctx, "key", []byte("expired"), time.Nanosecond); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Nanosecond)
+
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, _ = store.Get(ctx, "key")
+		}()
+		go func() {
+			defer wait.Done()
+			<-start
+			if err := store.Set(ctx, "key", []byte("fresh"), 0); err != nil {
+				t.Errorf("Set() = %v", err)
+			}
+		}()
+		close(start)
+		wait.Wait()
+
+		value, err := store.Get(ctx, "key")
+		if err != nil || string(value) != "fresh" {
+			t.Fatalf("iteration %d: Get() = %q, %v", iteration, value, err)
+		}
+	}
+}
+
+func BenchmarkMemoryParallelGet(b *testing.B) {
+	store := NewMemory()
+	ctx := context.Background()
+	if err := store.Set(ctx, "key", []byte("value"), 0); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(parallel *testing.PB) {
+		for parallel.Next() {
+			if _, err := store.Get(ctx, "key"); err != nil {
+				b.Error(err)
+				return
+			}
+		}
+	})
 }
