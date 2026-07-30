@@ -23,7 +23,7 @@ Usage:
   ossein migrate:rollback [--steps N] Roll back migrations
   ossein migrate:status              Show migration status
   ossein db:seed                     Run application seeders
-  ossein wire                        Generate explicit service wiring
+  ossein wire                        Generate explicit service wiring (experimental)
   ossein make:controller <name>      Generate a controller
   ossein make:middleware <name>      Generate middleware
   ossein make:request <name>         Generate a request type

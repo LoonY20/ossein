@@ -16,6 +16,10 @@ import (
 // service with explicit constructor calls in dependency order, removing
 // container reflection from application startup.
 //
+// GenerateWiring is experimental: the API and the shape of the generated
+// code may change or be removed before the first stable release. The service
+// container remains the default path.
+//
 // Singleton services become fields of a generated Services struct built by
 // Wire. Instance registrations become Wire parameters, because generated code
 // cannot reproduce runtime values. Transient registrations become factory
@@ -43,7 +47,7 @@ func GenerateWiring(app *App, packageName string) ([]byte, error) {
 }
 
 // WriteWiringFile generates wiring source and writes it to path, creating
-// parent directories when needed.
+// parent directories when needed. Like GenerateWiring, it is experimental.
 func WriteWiringFile(app *App, path, packageName string) error {
 	source, err := GenerateWiring(app, packageName)
 	if err != nil {
