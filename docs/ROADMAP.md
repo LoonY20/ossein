@@ -37,6 +37,29 @@ Goal: make common API work pleasant without hiding standard Go.
 - [x] typed environment configuration primitives
 - [x] configurable graceful-shutdown timeout
 
+The following gaps were found by building two applications on 0.2.0; see
+[field notes](FIELD_NOTES.md) for the evidence behind each one. They are core
+gaps rather than new modules: in each case the framework's own contract —
+structured JSON errors, an owned server lifecycle — does not currently hold.
+
+- [ ] configurable `http.Server`: timeouts, TLS, header and body limits,
+      `BaseContext`, and `ErrorLog`, through an option or `App.Serve`
+- [ ] safe default timeouts in `Run`/`RunContext` (today: none, and the
+      generated starter inherits that)
+- [ ] customizable `404` and `405` responses rendered through the error
+      handler, preserving `Allow` (today: `text/plain` from `ServeMux`)
+- [ ] an error path reachable from middleware: exported error envelope and a
+      `WriteError` helper, or a `*Context`-aware middleware form
+- [ ] raw request-body access that composes with `BindJSON`, for signed
+      payloads such as webhook HMACs
+- [ ] form and multipart binding with `BindJSON`'s guarantees: media-type
+      enforcement, shared body limit, automatic `Validate()`
+- [ ] query-string helpers and `BindQuery`
+- [ ] response helpers beyond `JSON` and `NoContent`: redirect, text, HTML,
+      file, and server-sent events
+- [ ] typed config support for lists and `encoding.TextUnmarshaler`
+      (today: scalars and `time.Duration` only)
+
 The current validation design intentionally uses an explicit `Validate() error` contract. More ergonomic validation helpers may be added later without making reflection a requirement for the core.
 
 Configuration uses a small amount of reflection only while loading tagged configuration structs. The HTTP request runtime remains reflection-free.
@@ -52,6 +75,11 @@ Goal: provide the Laravel-like productivity layer while keeping generated code o
 - [x] circular-dependency detection
 - [x] optional code-generation strategy for dependency wiring
       (`ossein wire`, experimental until validated by real applications)
+- [ ] `ossein wire` staleness detection: a `//go:generate` directive and a
+      checked-in regeneration test so CI fails when the generated graph drifts
+- [ ] documented package layout `ossein wire` requires — generated code cannot
+      reference `package main`, so single-package services must restructure
+      first
 - [x] `ossein new`
 - [x] `ossein dev`
 - [x] `ossein routes`
@@ -94,13 +122,27 @@ Goal: make Ossein useful for real backend services.
 
 - [ ] panic recovery middleware with structured 500 responses
 - [ ] access-log middleware built on the response status and size tracking
+- [ ] CORS middleware, including `OPTIONS` preflight short-circuiting
+      (today a preflight for a registered route answers `405` in plain text)
+- [ ] request timeout middleware that preserves `ResponseWriter` tracking and
+      renders through the error handler — `http.TimeoutHandler` replaces the
+      writer, silently disabling `Written()` and the already-committed guard
+- [ ] request body limit and security headers middleware
+- [ ] detached background context preserving the request ID and request-scoped
+      logger, for deferred work and future queue workers
+- [ ] driver-neutral SQL error classification: unique violation, deadlock,
+      serialization failure (today applications string-match driver messages)
 - [x] cache contract
 - [x] in-memory cache driver
 - [x] memory cache driver amortized expiration sweeping
 - [ ] memory cache driver configurable size bounds and eviction policy
 - [x] documented cache semantics for undecodable entries and backend
       write failures
-- [ ] optional atomic cache capability interfaces
+- [ ] optional atomic cache capability interfaces — needed for idempotency
+      keys, where `Get`-then-`Set` is racy by construction
+- [ ] lifecycle-managed cleanup for the memory driver: sampled reclamation is
+      driven by traffic, so a process idle after a burst holds expired entries
+      until its next write
 - [ ] distributed cache driver
 - [ ] queues and workers with lifecycle-managed graceful shutdown
 - [ ] database-backed queue driver on `database/sql` (`SKIP LOCKED`)
@@ -144,7 +186,8 @@ platform is a non-goal (see below).
 
 ## Phase 6 — Observability and API Tooling
 
-- [ ] testing utilities and HTTP test client with response assertions
+- [ ] testing utilities and HTTP test client with response assertions — the
+      first thing hand-rolled in both applications built on 0.2.0
 - [ ] OpenAPI generation
 - [ ] metrics
 - [ ] OpenTelemetry integration

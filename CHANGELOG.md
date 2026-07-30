@@ -7,6 +7,13 @@ Ossein uses semantic versioning for published releases.
 
 ## [Unreleased]
 
+### Added
+
+- field notes from building two applications on Ossein, and the roadmap items
+  they produced: `http.Server` configuration, `404`/`405` rendering, an error
+  path reachable from middleware, raw-body and form binding, and atomic cache
+  claims
+
 ## [0.2.0] - 2026-07-30
 
 ### Added
