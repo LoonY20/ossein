@@ -31,6 +31,22 @@ Ossein uses semantic versioning for published releases.
 - `ResponseWriterFrom` follows `Unwrap() http.ResponseWriter` chains, the same
   convention `http.ResponseController` uses, so middleware layered between
   Ossein and a handler no longer hides the recorded status and size
+- `ossein.WriteError(w, r, err)` renders an error through the application's
+  `ErrorHandler` from ordinary `net/http` middleware, which has no `*Context`.
+  The handler travels on the request context, so middleware needs no reference
+  to the `App`, and a custom `ErrorHandler` now applies to auth, rate-limit, and
+  CORS rejections instead of leaving one API with two error contracts
+- the error document is exported as `ErrorEnvelope` and `ErrorResponse`, so
+  applications can decode it in tests and clients and reuse the shape from a
+  custom `ErrorHandler`
+- `ossein.DefaultErrorHandler` is exported as the delegation target for a custom
+  `ErrorHandler` that only wants to own some errors. Delegating through
+  `WriteError` instead renders the default document rather than recursing
+
+- field notes from building two applications on Ossein, and the roadmap items
+  they produced: `http.Server` configuration, `404`/`405` rendering, an error
+  path reachable from middleware, raw-body and form binding, and atomic cache
+  claims
 
 ### Changed
 
@@ -38,12 +54,11 @@ Ossein uses semantic versioning for published releases.
   10s `ReadHeaderTimeout` and a 120s `IdleTimeout`, so an unattended server can
   no longer be held open indefinitely by connections that never complete a
   request. `ReadTimeout` and `WriteTimeout` remain unset so that large uploads
-  and server-sent events keep working; use `Serve` to set them.
-
-- field notes from building two applications on Ossein, and the roadmap items
-  they produced: `http.Server` configuration, `404`/`405` rendering, an error
-  path reachable from middleware, raw-body and form binding, and atomic cache
-  claims
+  and server-sent events keep working; use `Serve` to set them
+- `SetErrorHandler` now panics once the application is serving requests, matching
+  `Use`, route registration, and the new fallback setters. The request path reads
+  the handler, so a late replacement was both a data race and a source of
+  within-request disagreement between middleware and handlers
 
 ## [0.2.0] - 2026-07-30
 
