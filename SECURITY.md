@@ -6,7 +6,9 @@ Ossein is currently in an early development stage and is not ready for productio
 
 Please do not open a public issue for a suspected security vulnerability.
 
-Use GitHub's private vulnerability reporting feature when it is available for this repository. If private reporting is not available, contact the repository owner privately through GitHub before sharing technical details publicly.
+Report vulnerabilities privately through GitHub's security advisories:
+[Report a vulnerability](https://github.com/LoonY20/ossein/security/advisories/new).
+Reports reach the maintainers without disclosing details publicly.
 
 When reporting a vulnerability, include enough information to reproduce and understand the issue:
 
