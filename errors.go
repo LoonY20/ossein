@@ -2,6 +2,7 @@ package ossein
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 )
 
@@ -62,19 +63,67 @@ func Conflict(code, message string) *HTTPError {
 	return NewHTTPError(http.StatusConflict, code, message)
 }
 
-type errorEnvelope struct {
-	Error errorResponse `json:"error"`
+// ErrorEnvelope is the JSON document Ossein's default error handler writes.
+// It is exported so applications can decode it in tests and clients, and reuse
+// the shape from a custom ErrorHandler.
+type ErrorEnvelope struct {
+	Error ErrorResponse `json:"error"`
 }
 
-type errorResponse struct {
+// ErrorResponse describes a single failure. Fields is populated for validation
+// errors and omitted otherwise.
+type ErrorResponse struct {
 	Code    string              `json:"code"`
 	Message string              `json:"message"`
 	Fields  map[string][]string `json:"fields,omitempty"`
 }
 
+// WriteError renders err through the application's ErrorHandler from ordinary
+// net/http code, so middleware answers with the same error contract as handlers.
+//
+// Middleware is plain func(http.Handler) http.Handler and has no *Context, which
+// would otherwise leave it hand-rolling an error body that drifts from the
+// application's. The handler is carried on the request context, so no reference
+// to the App is needed:
+//
+//	func RequireAPIKey(keys map[string]string) ossein.Middleware {
+//		return func(next http.Handler) http.Handler {
+//			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//				if _, ok := keys[r.Header.Get("X-API-Key")]; !ok {
+//					ossein.WriteError(w, r, ossein.Unauthorized("invalid_api_key", "API key is not valid"))
+//					return
+//				}
+//				next.ServeHTTP(w, r)
+//			})
+//		}
+//	}
+//
+// Outside a request served by an Ossein application, WriteError falls back to
+// the default envelope. A nil error is reported as an internal error rather than
+// producing a blank response.
+func WriteError(w http.ResponseWriter, r *http.Request, err error) {
+	if err == nil {
+		err = errors.New("ossein: WriteError called with a nil error")
+	}
+
+	ctx := NewContext(w, r)
+	if handler := errorHandlerFromContext(r.Context()); handler != nil {
+		handler(ctx, err)
+		return
+	}
+	defaultErrorResponse(ctx, err, LoggerFromContext(r.Context()))
+}
+
 func (a *App) defaultErrorHandler(ctx *Context, err error) {
+	defaultErrorResponse(ctx, err, ctx.Logger())
+}
+
+// defaultErrorResponse renders Ossein's standard error document. It is shared by
+// the application's default handler and by WriteError outside a request served
+// by an application.
+func defaultErrorResponse(ctx *Context, err error, logger *slog.Logger) {
 	status := http.StatusInternalServerError
-	response := errorResponse{
+	response := ErrorResponse{
 		Code:    "internal_error",
 		Message: "Internal Server Error",
 	}
@@ -83,7 +132,7 @@ func (a *App) defaultErrorHandler(ctx *Context, err error) {
 	var validationErr *ValidationError
 	if errors.As(err, &validationErr) {
 		status = http.StatusUnprocessableEntity
-		response = errorResponse{
+		response = ErrorResponse{
 			Code:    "validation_failed",
 			Message: "The request data is invalid",
 			Fields:  validationErr.Fields,
@@ -100,11 +149,11 @@ func (a *App) defaultErrorHandler(ctx *Context, err error) {
 	}
 
 	if unexpected {
-		ctx.Logger().Error("unhandled request error", "error", err)
+		logger.Error("unhandled request error", "error", err)
 	}
 
 	if writer, ok := ResponseWriterFrom(ctx.Response); ok && writer.Written() {
-		ctx.Logger().Error(
+		logger.Error(
 			"response already committed; skipping error response",
 			"error", err,
 			"status", writer.Status(),
@@ -112,5 +161,5 @@ func (a *App) defaultErrorHandler(ctx *Context, err error) {
 		return
 	}
 
-	_ = ctx.JSON(status, errorEnvelope{Error: response})
+	_ = ctx.JSON(status, ErrorEnvelope{Error: response})
 }

@@ -59,6 +59,8 @@ Today Ossein intentionally stays small:
 - field-level `ValidationError` responses;
 - JSON `404` and `405` responses with a preserved `Allow` header, replaceable
   through `SetNotFoundHandler` and `SetMethodNotAllowedHandler`;
+- `WriteError` for rendering the application's error contract from plain
+  `net/http` middleware, plus the exported `ErrorEnvelope`;
 - typed environment configuration with defaults and required values;
 - optional dependency-free `.env` loading with exported-variable precedence;
 - standard-library `log/slog` integration;
@@ -394,6 +396,32 @@ func showUser(ctx *ossein.Context) error {
 ```
 
 Unexpected errors are logged through the request-scoped logger and rendered as a generic `500` response instead of leaking internal details. Applications can replace the renderer with `SetErrorHandler`.
+
+Middleware is plain `func(http.Handler) http.Handler` and has no `*Context`, so
+`WriteError` renders through the same handler. Auth, rate-limit, and CORS
+rejections then match the rest of the API instead of hand-rolling a body that
+drifts from it:
+
+```go
+func RequireAPIKey(keys map[string]string) ossein.Middleware {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            if _, ok := keys[r.Header.Get("X-API-Key")]; !ok {
+                ossein.WriteError(w, r, ossein.Unauthorized("invalid_api_key", "API key is not valid"))
+                return
+            }
+            next.ServeHTTP(w, r)
+        })
+    }
+}
+```
+
+The document itself is exported as `ossein.ErrorEnvelope`, for decoding in tests
+and clients or reusing the shape from a custom handler:
+
+```json
+{"error":{"code":"invalid_api_key","message":"API key is not valid"}}
+```
 
 ## Request binding and validation
 

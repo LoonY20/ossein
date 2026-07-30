@@ -31,6 +31,14 @@ Ossein uses semantic versioning for published releases.
 - `ResponseWriterFrom` follows `Unwrap() http.ResponseWriter` chains, the same
   convention `http.ResponseController` uses, so middleware layered between
   Ossein and a handler no longer hides the recorded status and size
+- `ossein.WriteError(w, r, err)` renders an error through the application's
+  `ErrorHandler` from ordinary `net/http` middleware, which has no `*Context`.
+  The handler travels on the request context, so middleware needs no reference
+  to the `App`, and a custom `ErrorHandler` now applies to auth, rate-limit, and
+  CORS rejections instead of leaving one API with two error contracts
+- the error document is exported as `ErrorEnvelope` and `ErrorResponse`, so
+  applications can decode it in tests and clients and reuse the shape from a
+  custom `ErrorHandler`
 
 ### Changed
 

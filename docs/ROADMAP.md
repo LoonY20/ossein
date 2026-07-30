@@ -52,8 +52,9 @@ structured JSON errors, an owned server lifecycle — does not currently hold.
 - [x] customizable `404` and `405` responses rendered through the error handler,
       preserving `Allow` (`SetNotFoundHandler`,
       `SetMethodNotAllowedHandler`)
-- [ ] an error path reachable from middleware: exported error envelope and a
-      `WriteError` helper, or a `*Context`-aware middleware form
+- [x] an error path reachable from middleware: `WriteError` plus the exported
+      `ErrorEnvelope`, chosen over a `*Context`-aware middleware form because it
+      keeps one middleware type and works with third-party middleware
 - [ ] raw request-body access that composes with `BindJSON`, for signed
       payloads such as webhook HMACs
 - [ ] form and multipart binding with `BindJSON`'s guarantees: media-type

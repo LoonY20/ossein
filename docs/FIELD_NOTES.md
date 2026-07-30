@@ -123,7 +123,7 @@ The writer that watches for misses exposes `Unwrap`, and `ResponseWriterFrom`
 now follows `Unwrap` chains, so the committed-response guard and server-sent
 events keep working through it. That also partly addresses item 11 below.
 
-### 3. Middleware cannot use the framework's error model
+### 3. Middleware cannot use the framework's error model — RESOLVED
 
 `Middleware` is `func(http.Handler) http.Handler`, so middleware has no
 `*Context`, cannot return an `*ossein.HTTPError`, and cannot reach the
@@ -147,6 +147,20 @@ affects the responses clients see most often.
 Better: an optional `App.UseContext(func(*Context, http.Handler) error)` so
 middleware can return errors like handlers do, keeping plain `Middleware` as the
 escape hatch.
+
+**Resolution.** The smaller option won, and the `*Context`-aware middleware form
+was dropped: it would have forked the middleware model in two, while `WriteError`
+also works with middleware the application did not write. The error handler
+travels on the request context, so middleware needs no reference to the `App`:
+
+```go
+ossein.WriteError(w, r, ossein.Unauthorized("invalid_api_key", "API key is not valid"))
+```
+
+`ErrorEnvelope` and `ErrorResponse` are exported for tests, clients, and custom
+handlers. Both services deleted their copied envelope structs — the duplication
+that motivated this item is now zero — and the probe that asserted the two
+contracts diverged was inverted to assert they agree.
 
 ## P2 — Boilerplate repeated in every project
 

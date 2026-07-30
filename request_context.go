@@ -13,6 +13,7 @@ import (
 
 type requestIDContextKey struct{}
 type loggerContextKey struct{}
+type errorHandlerContextKey struct{}
 
 func (a *App) requestContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,6 +32,10 @@ func (a *App) requestContextMiddleware(next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
 		ctx = context.WithValue(ctx, loggerContextKey{}, logger)
+		// Carrying the error handler lets WriteError render through the
+		// application's error contract from plain net/http middleware, which has
+		// no *Context and no reference to the App.
+		ctx = context.WithValue(ctx, errorHandlerContextKey{}, a.errorHandler)
 
 		next.ServeHTTP(NewResponseWriter(w), r.WithContext(ctx))
 	})
@@ -55,6 +60,16 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 		}
 	}
 	return slog.Default()
+}
+
+// errorHandlerFromContext returns the application's error handler when the
+// request was served by an Ossein application.
+func errorHandlerFromContext(ctx context.Context) ErrorHandler {
+	if ctx == nil {
+		return nil
+	}
+	handler, _ := ctx.Value(errorHandlerContextKey{}).(ErrorHandler)
+	return handler
 }
 
 func defaultRequestID() string {
