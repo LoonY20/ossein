@@ -79,8 +79,11 @@ Today Ossein intentionally stays small:
 - backend-neutral cache contract, concurrency-safe in-memory driver, and typed
   JSON/remember helpers;
 - JSON response helpers;
-- blocking server start with `Run`;
+- blocking server start with `Run`, with conservative default timeouts;
 - context-aware graceful shutdown with `RunContext`;
+- `Serve`, `ServeTLS`, and `ServeListener` for a caller-owned `*http.Server`:
+  timeouts, TLS, limits, and `BaseContext` stay yours while Ossein runs the
+  lifecycle;
 - native `http.Handler` escape hatches;
 - `ossein new`, hot-reloading `ossein dev`, `ossein routes`, and application-owned
   migration commands;
@@ -317,6 +320,45 @@ app.OnStop(func(ctx context.Context) error {
 ```
 
 `RunContext` executes the lifecycle around the HTTP server and performs graceful shutdown when its context is cancelled. The timeout can be configured with `WithShutdownTimeout`.
+
+`Run` and `RunContext` build the server for you with a `ReadHeaderTimeout` and
+an `IdleTimeout`, so an unattended server cannot be held open by connections
+that never finish a request. `ReadTimeout` and `WriteTimeout` are deliberately
+left unset, because a write deadline would cut off server-sent events and long
+downloads.
+
+When an application needs to own those settings — or `MaxHeaderBytes`,
+`BaseContext`, or `ErrorLog` — pass a configured server to `Serve` instead. Only
+`Handler` is filled in, and only when nil:
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+err := app.Serve(ctx, &http.Server{
+    Addr:              ":8080",
+    ReadHeaderTimeout: 5 * time.Second,
+    ReadTimeout:       30 * time.Second,
+    IdleTimeout:       60 * time.Second,
+    MaxHeaderBytes:    1 << 16,
+})
+```
+
+`Serve` runs the same lifecycle as `Run`: service validation, start hooks,
+graceful shutdown when the context is cancelled, then stop hooks.
+
+Two variants cover the rest. As in `net/http`, the protocol follows the method
+you call rather than a struct field, so setting `TLSConfig` alone never turns a
+plain server into an HTTPS one:
+
+```go
+// HTTPS from certificate files, or from server.TLSConfig when both paths are empty.
+err := app.ServeTLS(ctx, server, "cert.pem", "key.pem")
+
+// An already-bound listener: socket activation, an ephemeral test port, or TLS
+// composed with the standard library.
+err := app.ServeListener(ctx, server, tls.NewListener(listener, tlsConfig))
+```
 
 ## Route groups
 

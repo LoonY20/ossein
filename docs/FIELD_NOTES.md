@@ -50,7 +50,7 @@ Worth stating first, because these are the parts that should not regress:
 
 ## P1 — Blocks production use
 
-### 1. The HTTP server cannot be configured
+### 1. The HTTP server cannot be configured — RESOLVED
 
 `Run` and `RunContext` construct `&http.Server{Addr, Handler}` and nothing else.
 There is no `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, `ReadHeaderTimeout`,
@@ -68,6 +68,19 @@ framework exists to own.
 before `ListenAndServe` — or `App.Serve(ctx, *http.Server)` that keeps the
 existing lifecycle handling. Additionally, give `Run` non-zero default timeouts;
 a framework default of "no timeouts" is not a safe default.
+
+**Resolution.** `App.Serve(ctx, *http.Server)` now runs a caller-owned server
+through the full lifecycle, leaving every field except a nil `Handler`
+untouched, with `ServeTLS` and `ServeListener` covering HTTPS and already-bound
+listeners. The protocol follows the method called, as in `net/http`: an
+inference from `TLSConfig` was considered and rejected, because setting it only
+to raise `MinVersion` would then silently switch a server to HTTPS.
+
+`Run` and `RunContext` delegate to `Serve` and supply `ReadHeaderTimeout` and
+`IdleTimeout`; `ReadTimeout` and `WriteTimeout` stay unset on purpose, because a
+write deadline would cut off the server-sent events this framework otherwise
+supports. Rewriting both services against it removed the hand-rolled lifecycle
+block — linkr's `main.go` went from 100 lines to 52.
 
 ### 2. `404` and `405` bodies are neither JSON nor customizable
 
