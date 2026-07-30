@@ -17,7 +17,8 @@ import (
 // container reflection from application startup.
 //
 // GenerateWiring is experimental: the API and the shape of the generated
-// code may change before the first stable release.
+// code may change or be removed before the first stable release. The service
+// container remains the default path.
 //
 // Singleton services become fields of a generated Services struct built by
 // Wire. Instance registrations become Wire parameters, because generated code

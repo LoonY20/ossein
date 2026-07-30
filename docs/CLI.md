@@ -17,7 +17,7 @@ go install github.com/LoonY20/ossein/cmd/ossein@latest
 | `ossein migrate:rollback [--steps N]` | Roll back the latest applied migrations |
 | `ossein migrate:status` | Print applied and pending migrations |
 | `ossein db:seed` | Run application-defined database seeders |
-| `ossein wire` | Generate explicit service wiring |
+| `ossein wire` | Generate explicit service wiring (experimental) |
 | `ossein make:controller <name>` | Create an HTTP controller |
 | `ossein make:middleware <name>` | Create standard Go middleware |
 | `ossein make:request <name>` | Create an explicitly validated request |
