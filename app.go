@@ -236,7 +236,7 @@ func (a *App) registerRoutes() error {
 	a.routesMu.RUnlock()
 
 	for _, route := range routes {
-		handler := applyMiddleware(route.handler, route.group.chain())
+		handler := markRouted(applyMiddleware(route.handler, route.group.chain()))
 		if err := handleMuxPattern(a.mux, route.Method+" "+route.Pattern, handler); err != nil {
 			return err
 		}

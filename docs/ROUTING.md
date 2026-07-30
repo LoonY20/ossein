@@ -67,9 +67,23 @@ Passing `nil` to either restores the default. Both are ordinary handlers, so a
 returned error goes through the application's `ErrorHandler` like any other, and
 an application that customizes its error shape changes these responses with it.
 
-Only genuine routing misses are intercepted. A matched handler that answers
-`404` itself keeps its own response, and the implicit subtree and path-cleaning
-redirects `ServeMux` performs are untouched.
+Both must be set before the application starts serving requests, like routes and
+middleware.
+
+Only genuine routing misses are intercepted, which has three consequences worth
+knowing:
+
+- A matched handler that answers `404` itself keeps its own response, and the
+  implicit subtree and path-cleaning redirects `ServeMux` performs are untouched.
+- A route that delegates to another `http.ServeMux` owns everything below it, so
+  that mux's own `404` reaches the client unchanged.
+- Registering a catch-all such as `app.Get("/", spa)` means the router always
+  matches a `GET`, so the not-found handler never runs for one. A different
+  method on an unmatched path then produces `405`, not `404`, because `/` is
+  registered for `GET` only.
+
+A handler that returns without writing anything still produces the status it
+replaced, so a miss can never answer `200`.
 
 Generate a path with escaped values:
 
