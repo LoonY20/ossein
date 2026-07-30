@@ -49,8 +49,9 @@ structured JSON errors, an owned server lifecycle — does not currently hold.
 - [x] safe default timeouts in `Run`/`RunContext`: `ReadHeaderTimeout` and
       `IdleTimeout` bound half-open connections, while `ReadTimeout` and
       `WriteTimeout` stay unset so uploads and streaming keep working
-- [ ] customizable `404` and `405` responses rendered through the error
-      handler, preserving `Allow` (today: `text/plain` from `ServeMux`)
+- [x] customizable `404` and `405` responses rendered through the error handler,
+      preserving `Allow` (`SetNotFoundHandler`,
+      `SetMethodNotAllowedHandler`)
 - [ ] an error path reachable from middleware: exported error envelope and a
       `WriteError` helper, or a `*Context`-aware middleware form
 - [ ] raw request-body access that composes with `BindJSON`, for signed

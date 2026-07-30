@@ -82,7 +82,7 @@ write deadline would cut off the server-sent events this framework otherwise
 supports. Rewriting both services against it removed the hand-rolled lifecycle
 block — linkr's `main.go` went from 100 lines to 52.
 
-### 2. `404` and `405` bodies are neither JSON nor customizable
+### 2. `404` and `405` bodies are neither JSON nor customizable — RESOLVED
 
 A JSON API answers unmatched routes with `text/plain`:
 
@@ -108,6 +108,20 @@ inside its own prefix, so per-group handling is not an option either.
 `App.SetMethodNotAllowedHandler(HandlerFunc)`, invoked through the normal error
 pipeline and preserving `Allow`. Defaulting both to the JSON error envelope
 would make the error contract total.
+
+**Resolution.** Both hooks exist and default to the error envelope, with `Allow`
+preserved. The interesting part was the implementation. Deciding the route with
+`ServeMux.Handler` and dispatching the returned handler by hand looked clean but
+silently dropped path wildcards — `SetPathValue` happens inside
+`ServeMux.ServeHTTP` — which the CRUD example's test caught immediately. The mux
+therefore still performs the real dispatch, and only the response is watched:
+`ServeMux` leaves `Request.Pattern` empty exactly when nothing matched, which
+distinguishes a routing miss from a matched handler answering 404 itself, and
+leaves subtree redirects and path cleaning untouched.
+
+The writer that watches for misses exposes `Unwrap`, and `ResponseWriterFrom`
+now follows `Unwrap` chains, so the committed-response guard and server-sent
+events keep working through it. That also partly addresses item 11 below.
 
 ### 3. Middleware cannot use the framework's error model
 

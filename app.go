@@ -82,24 +82,26 @@ func WithMaxBindBytes(limit int64) Option {
 
 // App is the root Ossein application.
 type App struct {
-	mux                *http.ServeMux
-	middleware         []Middleware
-	errorHandler       ErrorHandler
-	logger             *slog.Logger
-	requestIDHeader    string
-	requestIDGenerator func() string
-	shutdownTimeout    time.Duration
-	maxBindBytes       int64
-	startHooks         []LifecycleHook
-	stopHooks          []LifecycleHook
-	services           *Container
-	routesMu           sync.RWMutex
-	routes             []*Route
-	namedRoutes        map[string]*Route
-	handlerOnce        sync.Once
-	handler            http.Handler
-	buildErr           error
-	frozen             atomic.Bool
+	mux                     *http.ServeMux
+	middleware              []Middleware
+	errorHandler            ErrorHandler
+	logger                  *slog.Logger
+	requestIDHeader         string
+	requestIDGenerator      func() string
+	shutdownTimeout         time.Duration
+	maxBindBytes            int64
+	startHooks              []LifecycleHook
+	stopHooks               []LifecycleHook
+	services                *Container
+	notFoundHandler         HandlerFunc
+	methodNotAllowedHandler HandlerFunc
+	routesMu                sync.RWMutex
+	routes                  []*Route
+	namedRoutes             map[string]*Route
+	handlerOnce             sync.Once
+	handler                 http.Handler
+	buildErr                error
+	frozen                  atomic.Bool
 }
 
 // New creates a new Ossein application backed by the standard library ServeMux.
@@ -115,6 +117,8 @@ func New(options ...Option) *App {
 		namedRoutes:        make(map[string]*Route),
 	}
 	app.errorHandler = app.defaultErrorHandler
+	app.notFoundHandler = defaultNotFoundHandler
+	app.methodNotAllowedHandler = defaultMethodNotAllowedHandler
 
 	for _, option := range options {
 		if option != nil {
@@ -221,7 +225,7 @@ func (a *App) buildHandler() error {
 			a.buildErr = err
 			return
 		}
-		a.handler = a.requestContextMiddleware(applyMiddleware(a.mux, a.middleware))
+		a.handler = a.requestContextMiddleware(applyMiddleware(a.dispatch(), a.middleware))
 	})
 	return a.buildErr
 }
@@ -232,7 +236,7 @@ func (a *App) registerRoutes() error {
 	a.routesMu.RUnlock()
 
 	for _, route := range routes {
-		handler := applyMiddleware(route.handler, route.group.chain())
+		handler := markRouted(applyMiddleware(route.handler, route.group.chain()))
 		if err := handleMuxPattern(a.mux, route.Method+" "+route.Pattern, handler); err != nil {
 			return err
 		}

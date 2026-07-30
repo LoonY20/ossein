@@ -24,10 +24,34 @@ func NewResponseWriter(w http.ResponseWriter) *ResponseWriter {
 }
 
 // ResponseWriterFrom returns the Ossein response writer wrapping w, if any.
+//
+// Writers that wrap another writer and expose it through
+// Unwrap() http.ResponseWriter are followed, the same convention
+// http.ResponseController uses, so middleware layered between Ossein and a
+// handler does not hide the recorded state.
 func ResponseWriterFrom(w http.ResponseWriter) (*ResponseWriter, bool) {
-	wrapped, ok := w.(*ResponseWriter)
-	return wrapped, ok
+	// The hop limit keeps a writer whose Unwrap returns itself from spinning
+	// forever, which would hang the request goroutine.
+	for hops := 0; w != nil && hops < maxResponseWriterUnwraps; hops++ {
+		if wrapped, ok := w.(*ResponseWriter); ok {
+			// A typed nil satisfies the assertion while being unusable.
+			if wrapped == nil {
+				return nil, false
+			}
+			return wrapped, true
+		}
+		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil, false
+		}
+		w = unwrapper.Unwrap()
+	}
+	return nil, false
 }
+
+// maxResponseWriterUnwraps bounds how deep ResponseWriterFrom follows a wrapper
+// chain.
+const maxResponseWriterUnwraps = 16
 
 // Header returns the header map of the underlying writer.
 func (w *ResponseWriter) Header() http.Header {
