@@ -116,7 +116,7 @@ func New(options ...Option) *App {
 		services:           NewContainer(),
 		namedRoutes:        make(map[string]*Route),
 	}
-	app.errorHandler = app.defaultErrorHandler
+	app.errorHandler = DefaultErrorHandler
 	app.notFoundHandler = defaultNotFoundHandler
 	app.methodNotAllowedHandler = defaultMethodNotAllowedHandler
 
@@ -147,9 +147,15 @@ func (a *App) Use(middleware ...Middleware) {
 
 // SetErrorHandler replaces the application error handler.
 // Passing nil restores Ossein's default JSON error handler.
+//
+// The request path reads this handler, so like route and middleware
+// registration it must be set before the application starts serving requests.
 func (a *App) SetErrorHandler(handler ErrorHandler) {
+	if a.frozen.Load() {
+		panic("ossein: the error handler must be set before the application starts serving requests")
+	}
 	if handler == nil {
-		a.errorHandler = a.defaultErrorHandler
+		a.errorHandler = DefaultErrorHandler
 		return
 	}
 

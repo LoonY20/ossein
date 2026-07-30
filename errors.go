@@ -1,6 +1,7 @@
 package ossein
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -78,6 +79,28 @@ type ErrorResponse struct {
 	Fields  map[string][]string `json:"fields,omitempty"`
 }
 
+// DefaultErrorHandler renders Ossein's standard error document: a
+// *ValidationError as 422 with its fields, an *HTTPError as its own status, and
+// anything else as a logged 500 that does not leak internal detail.
+//
+// It is the delegation target for a custom ErrorHandler that only wants to own
+// some errors:
+//
+//	app.SetErrorHandler(func(c *ossein.Context, err error) {
+//		var domain *DomainError
+//		if errors.As(err, &domain) {
+//			_ = c.JSON(domain.Status, domain.Payload())
+//			return
+//		}
+//		ossein.DefaultErrorHandler(c, err)
+//	})
+//
+// Like the default handler, it refuses to write over a response that is already
+// committed.
+func DefaultErrorHandler(ctx *Context, err error) {
+	defaultErrorResponse(ctx, err, ctx.Logger())
+}
+
 // WriteError renders err through the application's ErrorHandler from ordinary
 // net/http code, so middleware answers with the same error contract as handlers.
 //
@@ -98,29 +121,61 @@ type ErrorResponse struct {
 //		}
 //	}
 //
-// Outside a request served by an Ossein application, WriteError falls back to
-// the default envelope. A nil error is reported as an internal error rather than
-// producing a blank response.
+// WriteError applies to middleware registered through App.Use or Router.Use.
+// Middleware composed around App.Handler(), such as a wrapper installed on the
+// http.Server, runs before the request context exists; there WriteError falls
+// back to the default document and records the reason at debug level.
+//
+// A custom ErrorHandler may call WriteError to hand an error back: the second
+// entry renders the default document instead of recursing. DefaultErrorHandler
+// expresses that intent directly and is preferred.
+//
+// The committed-response guard reads state recorded on *ossein.ResponseWriter.
+// Ossein installs one per request, so the guard holds inside an application.
+// Elsewhere, wrap the writer once with NewResponseWriter and reuse it if the
+// guard matters.
+//
+// A nil error is reported as an internal error rather than producing a blank
+// response. Both w and r must be non-nil.
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	if err == nil {
 		err = errors.New("ossein: WriteError called with a nil error")
 	}
 
-	ctx := NewContext(w, r)
-	if handler := errorHandlerFromContext(r.Context()); handler != nil {
-		handler(ctx, err)
+	requestCtx := r.Context()
+	state := requestStateFromContext(requestCtx)
+
+	if state == nil {
+		LoggerFromContext(requestCtx).Debug(
+			"ossein: rendering an error outside an application request; " +
+				"the application error handler is not reachable here",
+		)
+		defaultErrorResponse(NewContext(w, r), err, LoggerFromContext(requestCtx))
 		return
 	}
-	defaultErrorResponse(ctx, err, LoggerFromContext(r.Context()))
-}
 
-func (a *App) defaultErrorHandler(ctx *Context, err error) {
-	defaultErrorResponse(ctx, err, ctx.Logger())
+	// Re-entering means the application's handler delegated back here. Render
+	// the default document rather than calling it again, which would recurse
+	// until the goroutine stack is exhausted.
+	if state.rendering || state.errorHandler == nil {
+		ctx := NewContext(w, r)
+		ctx.maxBindBytes = state.maxBindBytes
+		defaultErrorResponse(ctx, err, LoggerFromContext(requestCtx))
+		return
+	}
+
+	nested := *state
+	nested.rendering = true
+	marked := r.WithContext(context.WithValue(requestCtx, requestStateContextKey{}, &nested))
+
+	ctx := NewContext(w, marked)
+	ctx.maxBindBytes = nested.maxBindBytes
+	state.errorHandler(ctx, err)
 }
 
 // defaultErrorResponse renders Ossein's standard error document. It is shared by
-// the application's default handler and by WriteError outside a request served
-// by an application.
+// DefaultErrorHandler and by WriteError when no application handler is
+// reachable.
 func defaultErrorResponse(ctx *Context, err error, logger *slog.Logger) {
 	status := http.StatusInternalServerError
 	response := ErrorResponse{

@@ -416,12 +416,33 @@ func RequireAPIKey(keys map[string]string) ossein.Middleware {
 }
 ```
 
+`WriteError` covers middleware registered through `Use`. Middleware composed
+around `app.Handler()` runs before the request context exists, and falls back to
+the default document.
+
 The document itself is exported as `ossein.ErrorEnvelope`, for decoding in tests
 and clients or reusing the shape from a custom handler:
 
 ```json
 {"error":{"code":"invalid_api_key","message":"API key is not valid"}}
 ```
+
+A custom handler that only owns some errors delegates the rest to
+`ossein.DefaultErrorHandler`:
+
+```go
+app.SetErrorHandler(func(c *ossein.Context, err error) {
+    var domain *DomainError
+    if errors.As(err, &domain) {
+        _ = c.JSON(domain.Status, domain.Payload())
+        return
+    }
+    ossein.DefaultErrorHandler(c, err)
+})
+```
+
+Like routes and middleware, the error handler must be set before the application
+starts serving requests.
 
 ## Request binding and validation
 

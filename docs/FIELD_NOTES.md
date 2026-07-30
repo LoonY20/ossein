@@ -158,9 +158,22 @@ ossein.WriteError(w, r, ossein.Unauthorized("invalid_api_key", "API key is not v
 ```
 
 `ErrorEnvelope` and `ErrorResponse` are exported for tests, clients, and custom
-handlers. Both services deleted their copied envelope structs — the duplication
-that motivated this item is now zero — and the probe that asserted the two
-contracts diverged was inverted to assert they agree.
+handlers, and `DefaultErrorHandler` is exported as the delegation target for a
+handler that owns only some errors. That last one came out of review: without it,
+a handler wanting "handle mine, let the framework do the rest" had `WriteError`
+as its only discoverable option, and calling it from inside the handler recursed
+into a stack overflow — a fatal error no `recover` can catch. `WriteError` now
+renders the default document on re-entry instead.
+
+Both services deleted their copied envelope structs — the duplication that
+motivated this item is now zero — and the probe that asserted the two contracts
+diverged was inverted to assert they agree.
+
+Two boundaries are worth knowing: middleware composed around `app.Handler()`
+rather than registered with `Use` runs before the request context exists and
+falls back to the default document, and the committed-response guard needs an
+`*ossein.ResponseWriter` in the chain, which the framework installs per request
+but a standalone caller must provide.
 
 ## P2 — Boilerplate repeated in every project
 

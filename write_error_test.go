@@ -186,12 +186,6 @@ func TestWriteErrorRejectsNilError(t *testing.T) {
 	}
 }
 
-func TestErrorHandlerFromContextToleratesNilContext(t *testing.T) {
-	if handler := errorHandlerFromContext(nil); handler != nil {
-		t.Fatal("expected no handler for a nil context")
-	}
-}
-
 // TestErrorEnvelopeMatchesTheWireFormat pins the exported types against the
 // bytes handlers actually produce.
 func TestErrorEnvelopeMatchesTheWireFormat(t *testing.T) {

@@ -13,7 +13,19 @@ import (
 
 type requestIDContextKey struct{}
 type loggerContextKey struct{}
-type errorHandlerContextKey struct{}
+type requestStateContextKey struct{}
+
+// requestState carries the application settings that plain net/http helpers such
+// as WriteError need, since they receive only an http.ResponseWriter and a
+// *http.Request.
+//
+// rendering marks that the application's error handler is already on the stack,
+// which stops a handler that delegates back to WriteError from recursing.
+type requestState struct {
+	errorHandler ErrorHandler
+	maxBindBytes int64
+	rendering    bool
+}
 
 func (a *App) requestContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,10 +44,13 @@ func (a *App) requestContextMiddleware(next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
 		ctx = context.WithValue(ctx, loggerContextKey{}, logger)
-		// Carrying the error handler lets WriteError render through the
-		// application's error contract from plain net/http middleware, which has
-		// no *Context and no reference to the App.
-		ctx = context.WithValue(ctx, errorHandlerContextKey{}, a.errorHandler)
+		// Carrying the handler and the bind limit lets WriteError render through
+		// the application's error contract from plain net/http middleware, which
+		// has no *Context and no reference to the App.
+		ctx = context.WithValue(ctx, requestStateContextKey{}, &requestState{
+			errorHandler: a.errorHandler,
+			maxBindBytes: a.maxBindBytes,
+		})
 
 		next.ServeHTTP(NewResponseWriter(w), r.WithContext(ctx))
 	})
@@ -62,14 +77,11 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 	return slog.Default()
 }
 
-// errorHandlerFromContext returns the application's error handler when the
-// request was served by an Ossein application.
-func errorHandlerFromContext(ctx context.Context) ErrorHandler {
-	if ctx == nil {
-		return nil
-	}
-	handler, _ := ctx.Value(errorHandlerContextKey{}).(ErrorHandler)
-	return handler
+// requestStateFromContext returns the application settings recorded for this
+// request, or nil when the request was not served by an Ossein application.
+func requestStateFromContext(ctx context.Context) *requestState {
+	state, _ := ctx.Value(requestStateContextKey{}).(*requestState)
+	return state
 }
 
 func defaultRequestID() string {

@@ -26,6 +26,34 @@ registered when the application handler is built, not at declaration time.
 Routes and middleware cannot be added once the application starts serving
 requests.
 
+Middleware is ordinary `func(http.Handler) http.Handler`, so it has no
+`*ossein.Context`. To refuse a request using the application's error contract,
+call `WriteError`:
+
+```go
+func RequireAPIKey(keys map[string]string) ossein.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := keys[r.Header.Get("X-API-Key")]; !ok {
+				ossein.WriteError(w, r, ossein.Unauthorized("invalid_api_key", "API key is not valid"))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+```
+
+The rejection is rendered by the same `ErrorHandler` that renders handler errors,
+so a custom error shape covers both. This works for middleware registered through
+`Use`; middleware composed around `app.Handler()` runs before the request context
+exists and falls back to the default document.
+
+Group middleware only runs for requests that match a route in the group. An
+unmatched path inside a group prefix goes to the not-found handler without
+running the group's middleware, so concerns that must apply to every request,
+such as CORS headers or access logging, belong in `App.Use`.
+
 ## Named routes
 
 Every registration returns a `*ossein.Route`:
