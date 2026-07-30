@@ -108,6 +108,82 @@ Database-specific capabilities remain available through the selected driver.
 For applications committed exclusively to PostgreSQL, native pgx APIs may be a
 better choice than `database/sql`; Ossein preserves that escape hatch.
 
+## Query tooling: sqlx, sqlc, and native pgx
+
+Ossein does not ship query-layer adapters, because the standard library
+boundary already composes with the common Go approaches. The
+[database tooling example](../examples/database-tooling) compiles these
+patterns in CI.
+
+### sqlx
+
+[sqlx](https://github.com/jmoiron/sqlx) wraps the pool that `database.Register`
+already manages — one pool, one lifecycle:
+
+```go
+db, err := database.Register(app, config.Database)
+if err != nil {
+	return err
+}
+if err := ossein.Instance(app, sqlx.NewDb(db, config.Database.Driver)); err != nil {
+	return err
+}
+
+func NewUserRepository(db *sqlx.DB) *UserRepository {
+	return &UserRepository{db: db}
+}
+```
+
+### sqlc
+
+[sqlc](https://sqlc.dev) generates plain Go on top of `database/sql`, so its
+output works with Ossein without glue. Point `sqlc.yaml` at the migration
+directory so the schema has a single source of truth:
+
+```yaml
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/queries"
+    gen:
+      go:
+        package: "queries"
+        out: "internal/queries"
+```
+
+Register the generated `Queries` type through the container; it accepts the
+managed pool because `*sql.DB` satisfies sqlc's `DBTX`:
+
+```go
+if err := ossein.Instance(app, queries.New(db)); err != nil {
+	return err
+}
+```
+
+Inside `database.WithinTransaction`, `queries.New(tx)` scopes the same
+generated code to the transaction.
+
+### Native pgx
+
+Applications committed exclusively to PostgreSQL can skip `database/sql` and
+manage a native pool with the same lifecycle hooks Ossein uses internally:
+
+```go
+pool, err := pgxpool.New(ctx, dsn)
+if err != nil {
+	return err
+}
+if err := ossein.Instance(app, pool); err != nil {
+	return err
+}
+app.OnStart(func(ctx context.Context) error { return pool.Ping(ctx) })
+app.OnStop(func(context.Context) error { pool.Close(); return nil })
+```
+
+Migrations still run through the `database/sql` pgx stdlib driver; both pools
+can coexist during a migration step.
+
 ## Transactions
 
 `database.WithinTransaction` removes repetitive begin, rollback, panic, and

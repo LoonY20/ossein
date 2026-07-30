@@ -82,7 +82,8 @@ Goal: offer a coherent database workflow without inventing a mandatory ORM.
 - [x] seeders
 - [x] factories for tests
 - [x] transaction helpers
-- [ ] adapters for common Go database approaches
+- [x] documented sqlx, sqlc, and native pgx integration patterns with a
+      CI-compiled example
 
 The initial direction is to integrate proven Go database tooling instead of building a custom Eloquent-style ORM.
 
