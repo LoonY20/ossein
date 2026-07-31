@@ -1,6 +1,9 @@
 package ossein
 
-import "net/url"
+import (
+	"net/http"
+	"net/url"
+)
 
 // QueryBindable is implemented by request types that read themselves from the
 // query string.
@@ -9,10 +12,8 @@ import "net/url"
 // the request path stays free of reflection:
 //
 //	func (q *ListQuery) BindQuery(values *ossein.Values) error {
-//		q.Page = values.Int("page")
-//		if !values.Has("page") {
-//			q.Page = 1
-//		}
+//		q.Page = values.IntOr("page", 1)
+//		q.Search = values.String("q")
 //		return nil
 //	}
 type QueryBindable interface {
@@ -52,8 +53,18 @@ func (c *Context) Query() (*Values, error) {
 			WithCause(err)
 		return nil, c.queryErr
 	}
+	// The field count is capped for the same reason a form body's is: short empty
+	// keys expand into a far larger map than the request that carried them.
+	if len(values) > maxFormFields {
+		c.queryErr = NewHTTPError(
+			http.StatusRequestEntityTooLarge,
+			"too_many_fields",
+			"Query string contains too many fields",
+		)
+		return nil, c.queryErr
+	}
 
-	c.query = &Values{values: values}
+	c.query = NewValues(values)
 	return c.query, nil
 }
 

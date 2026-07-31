@@ -5,6 +5,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // maxFormFields bounds how many distinct fields a urlencoded body may carry. The
@@ -44,6 +45,16 @@ func (f *Form) Has(field string) bool {
 	}
 	_, ok := f.files[field]
 	return ok
+}
+
+// Required returns a trimmed field value, recording an error when it is absent or
+// blank. A field submitted as a file counts as present, so it is not reported
+// missing; use RequiredFile to read the upload itself.
+func (f *Form) Required(field string) string {
+	if _, uploaded := f.files[field]; uploaded {
+		return strings.TrimSpace(f.Values.String(field))
+	}
+	return f.Values.Required(field)
 }
 
 // File returns the first uploaded file for a field, or nil when it is absent.
@@ -141,6 +152,14 @@ func (c *Context) parseForm() (url.Values, map[string][]*multipart.FileHeader, e
 	}
 
 	if multipartRequest {
+		// ParseMultipartForm calls ParseForm when Form is unset, which parses the
+		// query string and would report a bad URL as a malformed body. Filling
+		// Form first keeps this bind body-only, matching the urlencoded branch.
+		if c.Request.Form == nil {
+			query, _ := url.ParseQuery(c.Request.URL.RawQuery)
+			c.Request.Form = query
+		}
+
 		// The in-memory limit is the body limit, and Body already capped the whole
 		// body at it, so no single part can exceed what remains and nothing is
 		// spilled to a temporary file. Removing the pre-read above would break
@@ -183,11 +202,9 @@ func (c *Context) checkFormContentType() (bool, error) {
 	}
 
 	// A malformed parameter still yields a usable media type, and net/http accepts
-	// such requests, so only the type itself decides.
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	if mediaType == "" && err != nil {
-		return false, unsupportedFormMediaType(err)
-	}
+	// such requests, so only the type itself decides. An unreadable header yields
+	// an empty type and falls through to the default below.
+	mediaType, _, _ := mime.ParseMediaType(contentType)
 
 	switch mediaType {
 	case "application/x-www-form-urlencoded":

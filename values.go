@@ -23,6 +23,15 @@ type Values struct {
 	errs   *ValidationError
 }
 
+// NewValues wraps a set of values, so a bind method can be exercised directly
+// rather than only through a request.
+func NewValues(values url.Values) *Values {
+	if values == nil {
+		values = url.Values{}
+	}
+	return &Values{values: values}
+}
+
 // All returns the underlying values, for cases the accessors do not cover.
 func (v *Values) All() url.Values {
 	return v.values
@@ -58,24 +67,13 @@ func (v *Values) Required(field string) string {
 // Int returns a field as an int. An absent field yields zero; a malformed one is
 // reported.
 func (v *Values) Int(field string) int {
-	return int(v.parseInt(field, strconv.IntSize))
+	parsed, _ := v.parseInt(field, strconv.IntSize)
+	return int(parsed)
 }
 
 // Int64 returns a field as an int64.
 func (v *Values) Int64(field string) int64 {
-	return v.parseInt(field, 64)
-}
-
-func (v *Values) parseInt(field string, bits int) int64 {
-	raw := strings.TrimSpace(v.values.Get(field))
-	if raw == "" {
-		return 0
-	}
-	parsed, err := strconv.ParseInt(raw, 10, bits)
-	if err != nil {
-		v.AddError(field, "must be a whole number")
-		return 0
-	}
+	parsed, _ := v.parseInt(field, 64)
 	return parsed
 }
 
@@ -85,37 +83,109 @@ func (v *Values) parseInt(field string, bits int) int64 {
 // comparison in an application's rules false, so a range check would silently
 // pass, and encoding the value as JSON afterwards fails.
 func (v *Values) Float64(field string) float64 {
-	raw := strings.TrimSpace(v.values.Get(field))
-	if raw == "" {
-		return 0
-	}
-	parsed, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
-		v.AddError(field, "must be a number")
-		return 0
-	}
+	parsed, _ := v.parseFloat(field)
 	return parsed
 }
 
 // Bool returns a field as a bool, accepting the forms strconv.ParseBool does plus
 // the "on" and "off" that HTML checkboxes and their clients use.
 func (v *Values) Bool(field string) bool {
+	parsed, _ := v.parseBool(field)
+	return parsed
+}
+
+// The parse helpers report whether this field yielded a usable value, so the Or
+// accessors can fall back without consulting Err, which would also see errors
+// recorded for other fields.
+
+func (v *Values) parseInt(field string, bits int) (int64, bool) {
 	raw := strings.TrimSpace(v.values.Get(field))
 	if raw == "" {
-		return false
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(raw, 10, bits)
+	if err != nil {
+		v.AddError(field, "must be a whole number")
+		return 0, false
+	}
+	return parsed, true
+}
+
+func (v *Values) parseFloat(field string) (float64, bool) {
+	raw := strings.TrimSpace(v.values.Get(field))
+	if raw == "" {
+		return 0, false
+	}
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		v.AddError(field, "must be a number")
+		return 0, false
+	}
+	return parsed, true
+}
+
+func (v *Values) parseBool(field string) (bool, bool) {
+	raw := strings.TrimSpace(v.values.Get(field))
+	if raw == "" {
+		return false, false
 	}
 	switch {
 	case strings.EqualFold(raw, "on"):
-		return true
+		return true, true
 	case strings.EqualFold(raw, "off"):
-		return false
+		return false, true
 	}
 	parsed, err := strconv.ParseBool(raw)
 	if err != nil {
 		v.AddError(field, "must be true or false")
-		return false
+		return false, false
 	}
-	return parsed
+	return parsed, true
+}
+
+// StringOr returns a field value, or fallback when the field is absent or blank.
+//
+// The Or accessors exist because a field submitted empty is still present: an HTML
+// form sends untouched inputs as "?page=", so pairing Has with a typed accessor
+// would skip the default and then report the zero value as invalid.
+func (v *Values) StringOr(field, fallback string) string {
+	if strings.TrimSpace(v.values.Get(field)) == "" {
+		return fallback
+	}
+	return v.values.Get(field)
+}
+
+// IntOr returns a field as an int, or fallback when it is absent or blank. A
+// malformed value is still reported and yields fallback.
+func (v *Values) IntOr(field string, fallback int) int {
+	if parsed, ok := v.parseInt(field, strconv.IntSize); ok {
+		return int(parsed)
+	}
+	return fallback
+}
+
+// Int64Or returns a field as an int64, or fallback when it is absent or blank.
+func (v *Values) Int64Or(field string, fallback int64) int64 {
+	if parsed, ok := v.parseInt(field, 64); ok {
+		return parsed
+	}
+	return fallback
+}
+
+// Float64Or returns a field as a float64, or fallback when it is absent or blank.
+func (v *Values) Float64Or(field string, fallback float64) float64 {
+	if parsed, ok := v.parseFloat(field); ok {
+		return parsed
+	}
+	return fallback
+}
+
+// BoolOr returns a field as a bool, or fallback when it is absent or blank.
+func (v *Values) BoolOr(field string, fallback bool) bool {
+	if parsed, ok := v.parseBool(field); ok {
+		return parsed
+	}
+	return fallback
 }
 
 // AddError records an application rule failure against a field, so a bind method

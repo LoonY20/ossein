@@ -309,9 +309,25 @@ missing fields, matching the reasoning behind the form media-type rule.
 is parsed directly.
 
 linkr's pagination block went from 25 lines of `strconv` and range checks to a
-five-line bind method, and `page=0` now answers `422` with a field-level error
+three-line bind method, and `page=0` now answers `422` with a field-level error
 instead of a hand-rolled `400`, matching the shape its JSON endpoints already
 used.
+
+Review caught that the idiom this item shipped was itself broken. `Has` reports
+presence, and an HTML form submits an untouched input as present-but-empty, so
+`?page=` made `Has` true while `Int` returned zero: the default was skipped and
+the zero value then failed validation. Rather than rewrite the documentation
+around the trap, the `Or` accessors remove it — `values.IntOr("page", 1)` is one
+call and cannot get this wrong. Review also found that query strings had no field
+count cap while bodies did, so the same payload was a `413` as a body and a 26 MB
+map as a URL; both now share the limit.
+
+Two design gaps worth recording. `Values` had no exported constructor, so a bind
+method — the unit this whole design exists to make explicit and ordinary — could
+only be exercised through a full HTTP request; `NewValues` fixes that. And
+`Form.Required` could not see files, so a field submitted as an upload was reported
+missing while `Has` and `File` both said it was there: embedding gives promotion,
+not virtual dispatch, so the override had to be written out.
 
 ### 7. The standard middleware set is missing
 

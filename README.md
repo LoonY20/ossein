@@ -524,10 +524,7 @@ type ReplayRequest struct {
 func (r *ReplayRequest) BindForm(form *ossein.Form) error {
     r.Event = form.Required("event")
     r.DryRun = form.Bool("dry_run")
-    r.Limit = form.Int("limit")
-    if !form.Has("limit") {
-        r.Limit = 10
-    }
+    r.Limit = form.IntOr("limit", 10)
     return nil
 }
 
@@ -542,10 +539,15 @@ func replay(c *ossein.Context) error {
 
 Accessors record field-level errors instead of returning them, so a bind method
 reads as a list of assignments. `Required`, `Int`, `Int64`, `Float64`, and `Bool`
-report a malformed value against its field; `Has` distinguishes an absent field
-from an empty one; `AddError` adds an application rule. Those errors are reported
-before `Validate` runs, so a malformed value is not also blamed for breaking a
-rule that never saw it.
+report a malformed value against its field; the `Or` variants take a default for a
+field that is absent or blank, which is what an HTML form submits for an untouched
+input; `Has` distinguishes an absent field from one that was never sent at all;
+`AddError` adds an application rule. Those errors are reported before `Validate`
+runs, so a malformed value is not also blamed for breaking a rule that never saw
+it.
+
+`ossein.NewValues` wraps a `url.Values`, so a bind method can be tested directly
+without building a request.
 
 Uploads come through `File`, `RequiredFile`, and `Files`, which return
 `*multipart.FileHeader`. Parts are held in memory under the same body limit, so
@@ -584,14 +586,8 @@ type ListQuery struct {
 }
 
 func (q *ListQuery) BindQuery(values *ossein.Values) error {
-    q.Page = values.Int("page")
-    if !values.Has("page") {
-        q.Page = 1
-    }
-    q.PerPage = values.Int("per_page")
-    if !values.Has("per_page") {
-        q.PerPage = 20
-    }
+    q.Page = values.IntOr("page", 1)
+    q.PerPage = values.IntOr("per_page", 20)
     q.Search = values.String("q")
     return nil
 }
