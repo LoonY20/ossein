@@ -329,7 +329,7 @@ only be exercised through a full HTTP request; `NewValues` fixes that. And
 missing while `Has` and `File` both said it was there: embedding gives promotion,
 not virtual dispatch, so the override had to be written out.
 
-### 7. The standard middleware set is missing — PARTLY RESOLVED
+### 7. The standard middleware set is missing — RESOLVED
 
 Panic recovery and access logging are already on the roadmap; both services
 wrote them identically, and the access-log middleware exists only to read the
@@ -376,9 +376,27 @@ what panicked: rendering the 500 re-entered that handler, which panicked again
 inside the deferred function where nothing could catch it, dropping the connection
 instead of answering. There is now a plain fallback for that case.
 
-CORS and request timeout are still open, and the timeout belongs with item 11:
-`http.TimeoutHandler` is what an application reaches for today, and it is what
-silently defeats response tracking.
+The timeout landed with item 11, since `http.TimeoutHandler` is what an application
+reaches for and is what silently defeats response tracking.
+
+CORS closed the item. The short-circuit is not a convenience: a preflight matches no
+route, so without it the router answers `405`, and group middleware cannot help
+because it does not run for a request matching no route in the group — both halves of
+the original complaint. Two configurations panic at setup rather than being served:
+a wildcard origin with credentials, which the specification forbids and which would
+let any site make authenticated requests with the user's cookies, and a configuration
+that can never allow anything. `AllowOriginFunc` covers subdomains and dynamic
+allowlists without inventing a pattern syntax.
+
+Only the body-limit middleware remains from the original list, and it is now the
+weakest item on it: `WithMaxBindBytes` already bounds every binding path and
+`Context.Body`, so a middleware version would mostly duplicate that.
+
+Across the whole set the package is 740 lines of implementation against 2,115 lines
+of tests, a ratio of nearly three to one. That is the honest cost of middleware whose
+failure modes are concurrency, ordering, and security rather than logic: almost every
+real defect found here was invisible to a passing test suite at full statement
+coverage, and only mutation testing surfaced it.
 
 ### 8. No queue or worker layer
 

@@ -67,7 +67,8 @@ Today Ossein intentionally stays small:
 - `WriteError` for rendering the application's error contract from plain
   `net/http` middleware, plus the exported `ErrorEnvelope`;
 - a `middleware` package with panic recovery, access logging, security headers,
-  and a request timeout that preserves response tracking;
+  CORS with preflight handling, and a request timeout that preserves response
+  tracking;
 - typed environment configuration with defaults and required values;
 - optional dependency-free `.env` loading with exported-variable precedence;
 - standard-library `log/slog` integration;
@@ -447,6 +448,32 @@ finishes near the deadline.
 Scope it to a group rather than applying it to long-lived streaming routes, and
 register it inside `Recover`, so a panic it forwards from the handler's goroutine is
 still caught.
+
+`CORS` answers cross-origin preflight requests and adds the headers a browser needs:
+
+```go
+app.Use(middleware.CORS(middleware.CORSOptions{
+    AllowedOrigins:   []string{"https://app.example.com"},
+    AllowedMethods:   []string{http.MethodGet, http.MethodPost},
+    AllowCredentials: true,
+    MaxAge:           10 * time.Minute,
+}))
+```
+
+Register it with `App.Use` rather than on a group. A preflight is an `OPTIONS`
+request that matches no route, so it must be answered before routing — and group
+middleware does not run for a request that matches no route in the group.
+
+A request with no `Origin` passes through untouched. An origin that is not allowed
+also passes through, without the headers that let a browser read the response, since
+enforcement is the browser's job. `Vary` is appended rather than replaced, so a value
+set elsewhere survives. `AllowOriginFunc` covers subdomains and allowlists held
+elsewhere.
+
+Two configurations panic at setup rather than being served unsafely: a wildcard
+origin together with `AllowCredentials`, which the specification forbids and which
+would let any site make authenticated requests with the user's cookies, and a
+configuration that can never allow anything.
 
 ## Route groups
 

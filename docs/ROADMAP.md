@@ -134,8 +134,9 @@ Goal: make Ossein useful for real backend services.
 - [x] access-log middleware built on the response status and size tracking
       (`middleware.AccessLog`)
 - [x] security headers middleware (`middleware.SecurityHeaders`)
-- [ ] CORS middleware, including `OPTIONS` preflight short-circuiting
-      (today a preflight for a registered route answers `405` in plain text)
+- [x] CORS middleware, including `OPTIONS` preflight short-circuiting
+      (`middleware.CORS`) — a preflight matches no route, so without it the router
+      answers `405`
 - [x] request timeout middleware that preserves `ResponseWriter` tracking and
       renders through the error handler (`middleware.Timeout`) —
       `http.TimeoutHandler` replaces the writer, silently disabling `Written()`
