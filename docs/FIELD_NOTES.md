@@ -186,7 +186,7 @@ but a standalone caller must provide.
 
 ## P2 — Boilerplate repeated in every project
 
-### 4. No raw body access that composes with `BindJSON`
+### 4. No raw body access that composes with `BindJSON` — RESOLVED
 
 Verifying an HMAC signature requires the exact received bytes; a re-marshalled
 struct will not match. A whitespace-only reformatting of the body correctly
@@ -204,6 +204,19 @@ duplicate framework logic and drift from it.
 configured limit and caches, plus `Context.BindJSONBytes(raw []byte, target any)`
 sharing `BindJSON`'s decoding and validation. Signature verification then
 becomes three lines with no duplicated policy.
+
+**Resolution.** `Context.Body()` reads once under the configured limit and
+caches, and `BindJSON` now reads through it. The proposed `BindJSONBytes` turned
+out to be unnecessary: because the bytes are cached, `BindJSON` already operates
+on bytes the handler has in hand, so the smaller API covers the case. The body is
+also handed back to `net/http`, so `ParseForm` still works after the raw bytes
+are taken.
+
+hooksink's handler dropped from 169 lines to 116: the duplicated body limit,
+strict decoder, trailing-value check, and validation call are gone, and the
+delivery size limit is now declared once as `WithMaxBindBytes` on the
+application. Its test that a whitespace-reformatted body fails verification still
+passes, so the exact-bytes guarantee survived the change.
 
 ### 5. No form or multipart binding
 

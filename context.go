@@ -1,6 +1,7 @@
 package ossein
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,11 @@ type Context struct {
 	Request  *http.Request
 
 	maxBindBytes int64
+
+	// body caches the request body once it has been read, so raw access and
+	// BindJSON compose instead of competing for a single-use stream.
+	body     []byte
+	bodyRead bool
 }
 
 // NewContext creates an Ossein request context around standard library HTTP types.
@@ -60,11 +66,58 @@ func (c *Context) NoContent(status int) error {
 	return nil
 }
 
+// Body returns the raw request body.
+//
+// It exists for payloads that must be inspected as received, such as a webhook
+// whose HMAC signature covers the exact bytes: re-encoding a decoded struct
+// would not reproduce them. The read is limited to the application's
+// WithMaxBindBytes setting and reports a 413 beyond it, exactly as BindJSON
+// does, so the limit stays in one place.
+//
+// The body is read once and cached, so Body may be called repeatedly and
+// BindJSON still works afterwards. The request body is left readable for
+// standard library helpers such as ParseForm.
+//
+// Body does not check Content-Type, because a raw body may be anything.
+func (c *Context) Body() ([]byte, error) {
+	if c.bodyRead {
+		return c.body, nil
+	}
+	if c.Request == nil || c.Request.Body == nil {
+		c.bodyRead = true
+		return nil, nil
+	}
+
+	limited := http.MaxBytesReader(c.Response, c.Request.Body, c.bindLimit())
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, bindJSONError(err, "Request body could not be read")
+	}
+
+	c.body = raw
+	c.bodyRead = true
+	// Hand the bytes back to net/http so ParseForm and similar helpers still see
+	// a readable body.
+	c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+	return raw, nil
+}
+
+// bindLimit returns the configured body limit, falling back to the default.
+func (c *Context) bindLimit() int64 {
+	if c.maxBindBytes > 0 {
+		return c.maxBindBytes
+	}
+	return defaultMaxBindBytes
+}
+
 // BindJSON decodes a JSON request body into target.
 // A non-empty Content-Type must be application/json or use a +json suffix.
 // The body is limited to the application's WithMaxBindBytes setting (1 MiB by
 // default) and unknown JSON fields are rejected. If target implements
 // Validatable, validation runs automatically after a successful decode.
+//
+// BindJSON reads through Body, so it may be called after the raw bytes have
+// already been taken.
 func (c *Context) BindJSON(target any) error {
 	if target == nil {
 		return BadRequest("invalid_request", "Request target cannot be nil")
@@ -74,12 +127,12 @@ func (c *Context) BindJSON(target any) error {
 		return err
 	}
 
-	limit := c.maxBindBytes
-	if limit <= 0 {
-		limit = defaultMaxBindBytes
+	raw, err := c.Body()
+	if err != nil {
+		return err
 	}
-	body := http.MaxBytesReader(c.Response, c.Request.Body, limit)
-	decoder := json.NewDecoder(body)
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(target); err != nil {

@@ -42,6 +42,11 @@ Ossein uses semantic versioning for published releases.
 - `ossein.DefaultErrorHandler` is exported as the delegation target for a custom
   `ErrorHandler` that only wants to own some errors. Delegating through
   `WriteError` instead renders the default document rather than recursing
+- `Context.Body` returns the raw request body under the configured
+  `WithMaxBindBytes` limit, for payloads that must be inspected as received such
+  as a webhook whose HMAC signature covers the exact bytes. The body is read once
+  and cached, so `BindJSON` still works afterwards and keeps its strict decoding
+  and automatic `Validate()`, and the body stays readable for `ParseForm`
 
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error

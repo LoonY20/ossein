@@ -55,8 +55,9 @@ structured JSON errors, an owned server lifecycle — does not currently hold.
 - [x] an error path reachable from middleware: `WriteError` plus the exported
       `ErrorEnvelope`, chosen over a `*Context`-aware middleware form because it
       keeps one middleware type and works with third-party middleware
-- [ ] raw request-body access that composes with `BindJSON`, for signed
-      payloads such as webhook HMACs
+- [x] raw request-body access that composes with `BindJSON`, for signed payloads
+      such as webhook HMACs (`Context.Body`, read once and cached under the
+      configured limit)
 - [ ] form and multipart binding with `BindJSON`'s guarantees: media-type
       enforcement, shared body limit, automatic `Validate()`
 - [ ] query-string helpers and `BindQuery`
