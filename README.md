@@ -67,7 +67,8 @@ Today Ossein intentionally stays small:
 - `WriteError` for rendering the application's error contract from plain
   `net/http` middleware, plus the exported `ErrorEnvelope`;
 - a `middleware` package with panic recovery, access logging, security headers,
-  and a request timeout that preserves response tracking;
+  CORS with preflight handling, and a request timeout that preserves response
+  tracking;
 - typed environment configuration with defaults and required values;
 - optional dependency-free `.env` loading with exported-variable precedence;
 - standard-library `log/slog` integration;
@@ -447,6 +448,42 @@ finishes near the deadline.
 Scope it to a group rather than applying it to long-lived streaming routes, and
 register it inside `Recover`, so a panic it forwards from the handler's goroutine is
 still caught.
+
+`CORS` answers cross-origin preflight requests and adds the headers a browser needs:
+
+```go
+app.Use(middleware.CORS(middleware.CORSOptions{
+    AllowedOrigins:   []string{"https://app.example.com"},
+    AllowedMethods:   []string{http.MethodGet, http.MethodPost},
+    AllowCredentials: true,
+    MaxAge:           10 * time.Minute,
+}))
+```
+
+Register it with `App.Use` rather than on a group, and inside `AccessLog`. A
+preflight is an `OPTIONS` request that matches no route, so it must be answered
+before routing — group middleware does not run for a request that matches no route in
+the group, and a log registered below CORS never sees a preflight at all.
+
+A request with no `Origin` passes through untouched. An origin that is not allowed
+also passes through, without the headers that let a browser read the response, since
+enforcement is the browser's job. `Vary` is appended rather than replaced, so a value
+set elsewhere survives.
+
+**CORS is not CSRF protection.** A simple cross-origin request needs no preflight, so
+it reaches the handler and runs whatever the browser then does with the response. CORS
+governs who may *read* a response, not who may cause one.
+
+Setup panics for configurations that cannot be served safely: one that can never
+allow anything, and `AllowCredentials` combined with a wildcard origin, the `null`
+origin, or an `AllowOriginFunc` that approves everything. That last check matters most
+and is the least obvious: a wildcard with credentials is inert, because browsers
+refuse the pair outright, while a function reflecting every origin *works* — so it,
+not the wildcard, is the configuration that would hand any site authenticated read
+access.
+
+`AllowOriginFunc` covers subdomains and allowlists held elsewhere. Match on the whole
+origin rather than a suffix: `https://evil-app.test` ends with `app.test`.
 
 ## Route groups
 

@@ -90,6 +90,17 @@ Ossein uses semantic versioning for published releases.
   cover error responses too, without replacing a header already present — including
   one deliberately set empty. Register `AccessLog` outside `Recover`, since a
   middleware only observes a status written below it
+- `middleware.CORS` answers cross-origin preflight requests and adds the response
+  headers a browser needs. Short-circuiting the preflight is necessary rather than
+  convenient: an `OPTIONS` request matches no route, so the router would otherwise
+  answer `405`. `Vary` is appended, never replaced, so a value set elsewhere
+  survives. Setup panics for configurations that cannot be served safely: one that can
+  never allow anything, and `AllowCredentials` combined with a wildcard origin, the
+  `null` origin, or an `AllowOriginFunc` that approves every origin — the last being
+  the one that actually grants any site authenticated read access, since browsers
+  refuse a wildcard with credentials outright. Configured methods are upper-cased,
+  because a browser compares the approved list byte for byte. `AllowOriginFunc` covers
+  subdomains and allowlists held elsewhere
 - `middleware.Timeout` bounds how long a request may take and answers `504` through
   the application's error handler. Unlike `http.TimeoutHandler`, it preserves the
   Ossein response writer, so `Written()` tracking, the committed-response guard, the

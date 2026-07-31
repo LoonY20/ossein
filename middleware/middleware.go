@@ -10,13 +10,17 @@
 //
 //	app.Use(
 //		middleware.AccessLog(),
+//		middleware.CORS(corsOptions),
 //		middleware.Recover(),
 //		middleware.SecurityHeaders(),
 //		middleware.Timeout(15*time.Second),
 //	)
 //
-// AccessLog goes outside Recover on purpose. A middleware only observes a status
-// written below it, so the other order logs a panicking request with the status it
-// had before recovery rather than the 500 the client received. Timeout goes inside
-// Recover, so a panic it forwards from the handler's goroutine is still caught.
+// The order matters in three places. AccessLog goes outermost, because a middleware
+// only observes a status written below it, so any other position logs a panicking
+// request with the status it had before recovery rather than the 500 the client
+// received. CORS goes inside AccessLog but above everything else: it answers a
+// preflight without reaching what follows, so a log registered below never sees one.
+// Timeout goes inside Recover, so a panic it forwards from the handler's goroutine is
+// still caught.
 package middleware
