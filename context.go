@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -233,4 +234,63 @@ func bindJSONError(err error, invalidJSONMessage string) error {
 		).WithCause(err)
 	}
 	return BadRequest("invalid_json", invalidJSONMessage).WithCause(err)
+}
+
+// Text writes a plain-text response.
+func (c *Context) Text(status int, text string) error {
+	return Text(c.Response, status, text)
+}
+
+// HTML writes an HTML response. Escaping untrusted values is html/template's job.
+func (c *Context) HTML(status int, markup string) error {
+	return HTML(c.Response, status, markup)
+}
+
+// Blob writes bytes with an explicit content type.
+func (c *Context) Blob(status int, contentType string, data []byte) error {
+	return Blob(c.Response, status, contentType, data)
+}
+
+// Stream copies from source without buffering it.
+func (c *Context) Stream(status int, contentType string, source io.Reader) error {
+	return Stream(c.Response, status, contentType, source)
+}
+
+// Redirect answers with a redirect to location. The status must be a 3xx.
+func (c *Context) Redirect(status int, location string) error {
+	return Redirect(c.Response, c.Request, status, location)
+}
+
+// File serves a file from the filesystem, with range requests, conditional requests,
+// and content-type detection handled by net/http.
+//
+// The path is trusted. Never build one from request data: nothing here prevents
+// "../../etc/passwd" from resolving. Serve user-selected files with FileFS, which
+// cannot escape the filesystem it is given.
+func (c *Context) File(path string) error {
+	http.ServeFile(c.Response, c.Request, path)
+	return nil
+}
+
+// FileFS serves a file from fsys. Unlike File, the name cannot escape fsys, so this is
+// the one to use when the name comes from the request.
+func (c *Context) FileFS(fsys fs.FS, name string) error {
+	http.ServeFileFS(c.Response, c.Request, fsys, name)
+	return nil
+}
+
+// Attachment serves a file as a download named filename.
+//
+// The name is encoded with mime.FormatMediaType, so a quote, a newline, or a non-ASCII
+// character in it cannot break out of the header — a download name is frequently user
+// data. Anything unrepresentable is percent-encoded into the RFC 5987 filename* form
+// rather than dropped.
+func (c *Context) Attachment(path, filename string) error {
+	if filename == "" {
+		return errors.New("ossein: attachment filename cannot be empty")
+	}
+
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	c.Response.Header().Set("Content-Disposition", disposition)
+	return c.File(path)
 }

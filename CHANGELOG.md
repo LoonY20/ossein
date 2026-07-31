@@ -138,6 +138,29 @@ Ossein uses semantic versioning for published releases.
   processed, failed, abandoned, and refused counts for a health endpoint.
   In-process means in-memory: pending jobs do not survive a crash, which the
   package documents rather than papers over
+- response helpers on `Context` for everything other than JSON: `Text`, `HTML`, `Blob`,
+  `Stream`, `Redirect`, `File`, `FileFS`, and `Attachment`, with `Text`, `HTML`, `Blob`,
+  `Stream`, and `Redirect` also available as package-level functions for plain
+  `net/http` handlers. All of them write through the Ossein response writer, so status
+  and size tracking, the access log, and the committed-response guard keep working —
+  which is what dropping to the raw writer costs. An unspecified content type becomes
+  `application/octet-stream` rather than being left for `net/http` to sniff, since
+  sniffing is how a text upload comes back as HTML. `Redirect` rejects a non-3xx status,
+  where the Location header is advisory and the redirect silently does not happen, and a
+  location containing a newline, which Go drops rather than reports. `File` delegates to
+  `net/http`, so range and conditional requests work; `FileFS` exists next to it because
+  a name from a request must not be able to escape the directory it is served from; and
+  `Attachment` encodes the filename with `mime.FormatMediaType`, since a download name is
+  frequently user data
+- `Context.EventStream` for server-sent events. Headers are written and flushed when the
+  stream opens, so the connection is live before the first event and a writer that cannot
+  flush is reported there rather than at the first send — a stream that cannot flush
+  delivers nothing until the handler returns, which for a stream is never. Multi-line
+  data becomes multiple data lines, a trailing newline does not end the event early, and
+  a newline in an id, name, or comment is rejected because it would let a value forge an
+  event. `X-Accel-Buffering: no` is set, without which nginx holds every event until its
+  proxy buffer fills. The Ossein response writer is preserved, so a stream is logged and
+  the error handler will not write over it
 - typed configuration understands more than scalars. `[]string`, `[]int`, and lists
   of any supported element type come from a comma-separated value, with entries
   trimmed and empty ones dropped, so a trailing comma is not a phantom element and a

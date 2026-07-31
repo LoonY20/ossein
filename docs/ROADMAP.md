@@ -64,8 +64,8 @@ structured JSON errors, an owned server lifecycle — does not currently hold.
       reflection-free)
 - [x] query-string helpers and `BindQuery`, sharing one typed accessor set with
       form binding through `Values`
-- [ ] response helpers beyond `JSON` and `NoContent`: redirect, text, HTML,
-      file, and server-sent events
+- [x] response helpers beyond `JSON` and `NoContent`: text, HTML, bytes, streams,
+      redirect, file, download, and server-sent events
 - [x] typed config support for lists and `encoding.TextUnmarshaler`, plus `url.URL`
       (which implements `BinaryUnmarshaler`, so the general mechanism misses it)
 - [ ] typed config support for maps — deliberately deferred: an environment encoding

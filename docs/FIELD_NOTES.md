@@ -547,7 +547,7 @@ Every `default` tag in its configuration was equally unverified, because every t
 built `Config` as a struct literal and the config probe used a mirror type. It now loads
 the real `Config` through the framework.
 
-### 10. `Context` has only `JSON` and `NoContent`
+### 10. `Context` has only `JSON` and `NoContent` — RESOLVED
 
 Redirects, plain text, HTML, files, and SSE all require dropping to the raw
 writer. `linkr`'s redirect calls `http.Redirect` directly. Streaming *works*
@@ -555,6 +555,32 @@ writer. `linkr`'s redirect calls `http.Redirect` directly. Streaming *works*
 
 **Proposal.** `Redirect`, `Text`, `HTML`, `Blob`, `File`, and an SSE helper built
 on `ResponseController`, all of which must keep `ResponseWriter` tracking intact.
+
+**Resolution.** All of them, plus `Stream`, `FileFS`, and `Attachment`. `linkr`'s
+redirect and its `robots.txt` go through the helpers now, and `hooksink` streams queue
+statistics to an operator over SSE — the case `JSON` structurally cannot serve, since
+the response never ends and so cannot be built and returned.
+
+What writing them turned up is that most of the value is not the line saved but the
+mistake refused:
+
+- **A redirect with a non-3xx status silently does not redirect.** The Location header
+  is advisory outside a 3xx, so the client renders the body and nobody notices until a
+  user reports it.
+- **A newline in a location or an SSE field is injection.** Go drops a header whose
+  value contains one, which converts an attack into an unexplainable missing header;
+  the SSE equivalent has no such protection at all and would let a value forge events.
+  Both are reported now.
+- **An unspecified content type invites sniffing**, which is how a text upload comes
+  back as HTML and executes. Every helper states a type.
+- **A download filename is user data.** `mime.FormatMediaType` is what keeps a quote in
+  it from ending the parameter early, and it percent-encodes rather than dropping
+  anything it cannot represent.
+- **A path from a request must not reach `http.ServeFile`.** `FileFS` exists next to
+  `File` for exactly that, and `File`'s doc says so rather than leaving it implied.
+- **A stream that cannot flush hangs.** Reporting it when the stream opens, rather than
+  at the first send, is the difference between an error and a handler that never
+  returns.
 
 ## P3 — Sharp edges and correctness risks
 
