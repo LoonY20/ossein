@@ -66,6 +66,20 @@ func RequestIDFromContext(ctx context.Context) string {
 	return requestID
 }
 
+// ContextWithLogger returns a context carrying logger, so LoggerFromContext finds it.
+//
+// It exists for work that is not a request: a queue worker, a scheduled task, a
+// command. Passing nil returns ctx unchanged.
+func ContextWithLogger(ctx context.Context, logger *slog.Logger) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if logger == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, loggerContextKey{}, logger)
+}
+
 // LoggerFromContext returns the request-scoped logger when available.
 // It falls back to slog.Default for contexts not created by Ossein.
 func LoggerFromContext(ctx context.Context) *slog.Logger {

@@ -115,6 +115,32 @@ Ossein uses semantic versioning for published releases.
   map write. A panic on the handler's goroutine is forwarded to the request goroutine
   for `Recover`, and one arriving after the deadline is logged rather than lost
 
+- a `queue` package for background work: `queue.Memory` is a bounded in-process
+  job queue with a worker pool, per-job-name handlers, retries with backoff, and
+  a drain on shutdown, and `queue.Register` ties it into the application
+  lifecycle so workers start with the server and finish their in-flight jobs
+  before `Stop` returns. Handlers take a `context.Context` and a `Job`, the same
+  shape as an HTTP handler, and enqueuing goes through the `Enqueuer` interface,
+  so a handler depends on the contract rather than on the implementation and a
+  durable driver can replace it later without touching call sites. A full queue
+  is reported as `ErrFull` and a stopped one as `ErrClosed`, so an application can
+  shed load with a `503` instead of reporting back-pressure as a server fault; a
+  panicking job becomes an error for the retry path rather than taking the worker
+  down, and a job whose name has no handler is refused at enqueue time, where the
+  caller can still see it. A job runs under a context that a graceful drain leaves
+  alone — draining means waiting for the job, not interrupting it — and that is
+  cancelled when the drain runs out of time, so a handler can tell "finish up" from
+  "the process is going away". `Stop` reports what it could not finish, including
+  accepted work that no worker ever ran, so a dropped job is never reported as a
+  clean shutdown. `ErrAbandoned` marks a job whose retries were cut short by
+  shutdown rather than exhausted, because filing those as dead letters means
+  recording live work as dead on every deploy. `Stats` exposes queue depth and
+  processed, failed, abandoned, and refused counts for a health endpoint.
+  In-process means in-memory: pending jobs do not survive a crash, which the
+  package documents rather than papers over
+- `ossein.ContextWithLogger` puts a logger into a context that did not come from
+  a request, so background work logs through the same handler as the rest of the
+  application
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error
   path reachable from middleware, raw-body and form binding, and atomic cache

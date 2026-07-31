@@ -415,7 +415,7 @@ failure modes are concurrency, ordering, and security rather than logic: almost 
 real defect found here was invisible to a passing test suite at full statement
 coverage, and only mutation testing surfaced it.
 
-### 8. No queue or worker layer
+### 8. No queue or worker layer — RESOLVED
 
 Acknowledging a webhook in milliseconds and processing it afterwards required
 hand-writing a 210-line file: bounded channel, worker pool, retry with backoff,
@@ -424,6 +424,69 @@ counters. None of it was application-specific.
 
 This is already Phase 4 on the roadmap; the note here is only that it is the
 single largest block of framework-shaped code an application must supply today.
+
+**Resolution.** The `queue` package. `queue.Memory` is a bounded queue with a
+worker pool, per-job-name handlers, retries with backoff, a failure hook, and
+`Stats`; `queue.Register` wires it into the lifecycle. `hooksink`'s 211-line
+`queue.go` is gone, replaced by a `NewMemory` call and two `Handle` registrations.
+
+Three things came out of writing it that the hand-rolled version got wrong, and
+they are the reason this belongs in the framework rather than in each application:
+
+- **Enqueue racing shutdown panicked.** `close(jobs)` followed by a send is
+  `send on closed channel` — a crash, not an error. The fix is an `RWMutex` held
+  across the send and taken exclusively by `Stop`. Found by a test written for
+  exactly this, not by the suite that already passed.
+- **Back-pressure and shutdown are not server faults.** `ErrFull` and `ErrClosed`
+  are sentinels precisely so an application can answer `503`. Without them, the
+  natural code path reports a busy queue as a `500`.
+- **A panicking job took the worker down.** With four workers, four bad payloads
+  silently drain the pool. Recovering into an error puts it on the retry path
+  instead, where the failure handler can see it.
+
+The durability trade-off is documented rather than hidden: pending jobs do not
+survive a crash. That is correct for work whose source will retry (a webhook the
+provider redelivers) and wrong for work that must not be lost — which is what the
+`Enqueuer` interface is for. A durable driver is a separate step; the contract
+that lets it drop in without touching call sites is here now.
+
+**And four more defects the review found in my implementation**, which is the more
+useful record:
+
+- **A second unsynchronized map.** I fixed the channel race and then read the
+  handler table from `Enqueue` with no lock at all, while `Handle` was still writing
+  it. Both are legal before `Start`. An unsynchronized map read against a write is a
+  `fatal error`, not a panic — `middleware.Recover` cannot catch it and the process
+  dies. My struct comment asserted the table was "written before Start and read by
+  workers afterwards", which is exactly the belief that let me miss the third reader.
+- **`Stop` reported success while dropping work.** A queue stopped without having
+  started — an earlier start hook failed, so the queue's never ran — closed its
+  "finished" signal eagerly and returned `nil` with jobs still in the buffer. The
+  same eager close then made every later `Stop` return instantly, so a subsequent
+  shutdown could report a clean drain with a job mid-flight.
+- **A job could never observe shutdown.** Every handler context came from
+  `context.Background()`, so a job had no way to know the drain had given up, and
+  workers kept starting new jobs after `Stop` returned its error — against
+  dependencies the stop hooks were already closing. The fix distinguishes the two
+  cases that were conflated: a graceful drain leaves the context alone (waiting for
+  the job is the whole point), an expired one cancels it.
+- **Abandoned was reported as dead.** A job that happened to be in its backoff when
+  shutdown began was handed to the failure handler as permanently failed, and my own
+  docs said that hook fires only on exhausted attempts. In production that means a
+  dead-letter entry for live work on every deploy.
+
+Two of the tests I cited as evidence in this very entry could not fail. The
+"found by a test written for exactly this" claim above was false: the stress test
+that shipped never hit the window, and the fix it protects could be deleted with the
+suite still green — the reviewer had to scale it 300× to reproduce. It is now driven
+deterministically through an injection point, and both ways of removing the lock die
+with the exact `send on closed channel` panic. The abandonment test measured only
+that shutdown was fast, which skipping the delay and running the remaining attempts
+back-to-back also satisfies; it now counts invocations.
+
+Twenty-one mutations, one per guard and ordering decision in the package, are now
+each confirmed to fail at least one test. That is a materially different claim from
+the 100% statement coverage this package had while all of the above was true.
 
 ### 9. Typed config handles only scalars
 
@@ -565,6 +628,19 @@ framework-run workers will face the same problem.
 **Proposal.** `ossein.Detach(ctx) context.Context` returning a non-cancellable
 context that preserves the request ID and logger, and have any future queue
 carry it automatically.
+
+**Correction (finding 8's review).** The evidence above was worthless: the probe
+compared the request ID against `RequestIDFromContext(context.Background())`, which
+is empty by construction. It never attempted to inherit anything and could not have
+failed. Rewritten, it shows `context.WithoutCancel(c.Context())` already carries
+both the request ID and the logger — they are context values, and only the
+cancellation is dropped.
+
+So the gap is smaller than this note claimed: the mechanism exists in the standard
+library, and `ossein.Detach` would be a thin alias for it. What is genuinely missing
+is the other direction — a job cannot be correlated with the request that enqueued
+it, because `Job` carries no place to put the ID and the worker builds its context
+from scratch. That is the part worth designing.
 
 ### 15. No driver-neutral SQL error classification
 
