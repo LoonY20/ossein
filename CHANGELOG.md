@@ -65,6 +65,14 @@ Ossein uses semantic versioning for published releases.
   the same body limit, so nothing is spilled to a temporary file, and the number
   of urlencoded fields is capped because the body limit does not bound the size of
   the parsed form
+- `Context.BindQuery` and `Context.Query` for the query string, on the same typed
+  accessors as forms: `Values` holds the accessor set and `Form` embeds it, so
+  learning it once covers both. `BindQuery` takes a `QueryBindable` and applies the
+  same error precedence and automatic `Validate()`; `Query` returns the parsed
+  values for a handler that wants one or two parameters without a request type. A
+  malformed query string is reported as a `400` instead of binding as silently
+  missing fields, and only the query string is read, so a form body never satisfies
+  a query field
 
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error

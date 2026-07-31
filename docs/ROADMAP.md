@@ -62,7 +62,8 @@ structured JSON errors, an owned server lifecycle — does not currently hold.
       enforcement, shared body limit, automatic `Validate()` (`BindForm` and the
       explicit `FormBindable` contract, so the request path stays
       reflection-free)
-- [ ] query-string helpers and `BindQuery`
+- [x] query-string helpers and `BindQuery`, sharing one typed accessor set with
+      form binding through `Values`
 - [ ] response helpers beyond `JSON` and `NoContent`: redirect, text, HTML,
       file, and server-sent events
 - [ ] typed config support for lists and `encoding.TextUnmarshaler`

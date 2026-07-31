@@ -30,6 +30,10 @@ type Context struct {
 	body     []byte
 	bodyErr  error
 	bodyRead bool
+
+	// query caches the parsed query string, or the failure to parse it.
+	query    *Values
+	queryErr error
 }
 
 // NewContext creates an Ossein request context around standard library HTTP types.

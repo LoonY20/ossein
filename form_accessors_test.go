@@ -23,7 +23,7 @@ type accessorProbe struct {
 }
 
 func (p *accessorProbe) BindForm(form *Form) error {
-	p.values = form.Values()
+	p.values = form.All()
 	p.text = form.String("text")
 	p.texts = form.Strings("texts")
 	p.number = form.Int64("number")
@@ -73,7 +73,7 @@ func TestFormAccessorsReadSubmittedValues(t *testing.T) {
 		t.Fatal(`Bool(checkbox) with "on" = false, want true`)
 	}
 	if probe.values.Get("text") != "hello" {
-		t.Fatalf("Values() = %v", probe.values)
+		t.Fatalf("All() = %v", probe.values)
 	}
 	if probe.err != nil {
 		t.Fatalf("Err() = %v, want nil", probe.err)
@@ -190,16 +190,43 @@ func (ruleBinder) BindForm(form *Form) error {
 	return nil
 }
 
-// TestBindFormRejectsAMalformedContentType covers a header the media-type parser
-// cannot read at all.
-func TestBindFormRejectsAMalformedContentType(t *testing.T) {
+// TestBindFormToleratesAMalformedContentTypeParameter keeps a broken parameter
+// from rejecting a request whose media type is a form. net/http accepts these, and
+// answering 415 with a message naming the very type that was sent reads as a
+// contradiction.
+func TestBindFormToleratesAMalformedContentTypeParameter(t *testing.T) {
+	var mode string
+	app := New()
+	app.Post("/", func(c *Context) error {
+		if err := c.BindForm(&modeCapture{mode: &mode}); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("mode=fast"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=")
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body %q)", response.Code, response.Body.String())
+	}
+	if mode != "fast" {
+		t.Fatalf("mode = %q", mode)
+	}
+}
+
+// TestBindFormRejectsAnUnreadableContentType covers a header the media-type parser
+// cannot get a type out of at all.
+func TestBindFormRejectsAnUnreadableContentType(t *testing.T) {
 	app := New()
 	app.Post("/", func(c *Context) error {
 		return c.BindForm(&ruleBinder{})
 	})
 
 	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("mode=fast"))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded; boundary=")
+	request.Header.Set("Content-Type", "/////")
 	response := httptest.NewRecorder()
 	app.ServeHTTP(response, request)
 
