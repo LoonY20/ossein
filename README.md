@@ -54,6 +54,8 @@ Today Ossein intentionally stays small:
 - explicit `HTTPError` helpers for expected failures;
 - JSON request binding with unknown-field rejection, Content-Type validation,
   and a configurable body size limit;
+- raw body access through `Context.Body` that composes with `BindJSON`, for
+  signed payloads such as webhook HMACs;
 - response status and size tracking through a wrapped `http.ResponseWriter`;
 - validation through an explicit `Validate() error` contract;
 - field-level `ValidationError` responses;
@@ -475,6 +477,32 @@ Binding automatically calls `Validate` when the target implements `ossein.Valida
 other media types with a `415` response. Bodies are limited to 1 MiB by
 default; configure the limit with `ossein.WithMaxBindBytes` and oversized bodies
 render `413`.
+
+When a payload must be inspected as received — a webhook whose HMAC signature
+covers the exact bytes, where a re-encoded struct would not match — take them
+with `Body`. The body is read once under the same limit and cached, so `BindJSON`
+still works afterwards with its strict decoding and automatic validation:
+
+```go
+func receive(c *ossein.Context) error {
+    raw, err := c.Body()
+    if err != nil {
+        return err
+    }
+    if !validSignature(c.Request.Header.Get("X-Signature"), raw) {
+        return ossein.Unauthorized("invalid_signature", "Signature does not match")
+    }
+
+    var delivery Delivery
+    if err := c.BindJSON(&delivery); err != nil {
+        return err
+    }
+    return c.JSON(http.StatusAccepted, delivery)
+}
+```
+
+`Body` does not check `Content-Type`, since a raw body may be anything, and it
+leaves the request body readable for helpers such as `ParseForm`.
 
 ## Standard Go escape hatch
 
