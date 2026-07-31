@@ -69,7 +69,8 @@ Today Ossein intentionally stays small:
 - a `middleware` package with panic recovery, access logging, security headers,
   CORS with preflight handling, and a request timeout that preserves response
   tracking;
-- typed environment configuration with defaults and required values;
+- typed environment configuration with defaults and required values, including
+  comma-separated lists, `encoding.TextUnmarshaler` types, and URLs;
 - optional dependency-free `.env` loading with exported-variable precedence;
 - standard-library `log/slog` integration;
 - automatic request IDs and request-scoped loggers;
@@ -277,7 +278,41 @@ config, err := ossein.LoadConfig[Config]()
 Already exported environment variables take precedence over `.env`, which
 keeps deployment configuration authoritative.
 
-The first configuration layer supports strings, booleans, integers, unsigned integers, floats, and `time.Duration`. Nested structs are supported. Reflection is limited to configuration loading and is not part of Ossein's request runtime.
+Beyond strings, booleans, integers, unsigned integers, floats, `time.Duration`,
+and nested structs, three shapes cover most of what is left:
+
+```go
+type Config struct {
+    // Lists, from a comma-separated value. Entries are trimmed, and empty ones
+    // dropped, so a trailing comma or a value spaced out for readability is fine.
+    Origins  []string        `env:"ALLOWED_ORIGINS" default:"http://localhost:3000"`
+    Ports    []int           `env:"PORTS"`
+    Timeouts []time.Duration `env:"TIMEOUTS"`
+
+    // Anything implementing encoding.TextUnmarshaler parses itself, which covers
+    // slog.Level, net/netip addresses, net.IP, time.Time, and your own types.
+    Level  slog.Level `env:"LOG_LEVEL" default:"info"`
+    Region RegionCode `env:"REGION"`
+
+    // URLs, by value or by pointer.
+    BaseURL *url.URL `env:"BASE_URL" default:"http://localhost:8080"`
+
+    // A key or a secret: []byte is the raw value, never split on commas.
+    Signing []byte `env:"SIGNING_KEY"`
+}
+```
+
+A bad list entry says which one it was (`element 2: invalid integer "two"`), and a
+type that rejects a value in its own `UnmarshalText` fails startup rather than
+loading something wrong. `byte` is an alias for `uint8`, so `[]uint8` is the same
+type as `[]byte` and is also treated as a raw value — use a wider element type for a
+list of small numbers.
+
+Maps are deliberately not supported: `KEYS=a=1,b=2` needs two separator conventions,
+both arbitrary, so that encoding stays the application's to choose.
+
+Reflection is limited to configuration loading and the service container, and is not
+part of Ossein's request runtime.
 
 For tests or custom environment sources, use `LoadConfigFromEnv` with an explicit lookup function.
 

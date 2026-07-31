@@ -138,6 +138,18 @@ Ossein uses semantic versioning for published releases.
   processed, failed, abandoned, and refused counts for a health endpoint.
   In-process means in-memory: pending jobs do not survive a crash, which the
   package documents rather than papers over
+- typed configuration understands more than scalars. `[]string`, `[]int`, and lists
+  of any supported element type come from a comma-separated value, with entries
+  trimmed and empty ones dropped, so a trailing comma is not a phantom element and a
+  bad entry is reported by position rather than leaving the operator to bisect the
+  value by hand. Any type implementing `encoding.TextUnmarshaler` parses itself,
+  which covers `slog.Level`, `net/netip` addresses, `net.IP`, `time.Time`, and
+  application types that validate their own input — a named type now parses itself
+  instead of being assigned as its underlying string. `url.URL` and `*url.URL` are
+  parsed with `url.Parse`, since `url.URL` implements `BinaryUnmarshaler` rather than
+  `TextUnmarshaler` and the general mechanism does not reach it. `[]byte` stays the
+  raw value: a key or a secret must not be split on commas. Maps remain unsupported,
+  deliberately — their environment encoding needs two arbitrary separators
 - `ossein.ContextWithLogger` puts a logger into a context that did not come from
   a request, so background work logs through the same handler as the rest of the
   application
