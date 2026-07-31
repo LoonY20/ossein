@@ -329,7 +329,7 @@ only be exercised through a full HTTP request; `NewValues` fixes that. And
 missing while `Has` and `File` both said it was there: embedding gives promotion,
 not virtual dispatch, so the override had to be written out.
 
-### 7. The standard middleware set is missing
+### 7. The standard middleware set is missing — PARTLY RESOLVED
 
 Panic recovery and access logging are already on the roadmap; both services
 wrote them identically, and the access-log middleware exists only to read the
@@ -344,6 +344,30 @@ paths, so preflight cannot be handled per group.
 **Proposal.** Ship recovery, access log, CORS (including preflight
 short-circuiting), timeout, and body limit as framework middleware. They are
 mechanical, dependency-free, and currently rewritten per project.
+
+**Resolution so far.** A `middleware` package now provides `Recover`,
+`AccessLog`, and `SecurityHeaders`. They live in a subpackage rather than the
+root, following the same rule as `database` and `migrate`: an optional domain that
+depends on the core, not the other way round, and the root package is already
+flat and large.
+
+Both services deleted their copies. hooksink's middleware file is gone entirely
+and linkr's dropped from 150 lines to 89, leaving only the two middlewares that
+are genuinely specific to it — API-key auth and rate limiting — both of which now
+report through `WriteError` from item 3.
+
+Writing these turned up a lesson about my own tests, not the framework. Two of
+them passed against a deliberately broken implementation: a security-header
+override test that a handler wins by ordering regardless of the guard being
+tested, and a committed-response test that the default error handler's own guard
+already satisfies. Both were rewritten to isolate what they claim — the header set
+by an *outer* middleware, and an error handler that writes unconditionally. Worth
+recording because this is the third time in this document that full statement
+coverage sat next to an assertion that could not fail.
+
+CORS and request timeout are still open, and the timeout belongs with item 11:
+`http.TimeoutHandler` is what an application reaches for today, and it is what
+silently defeats response tracking.
 
 ### 8. No queue or worker layer
 

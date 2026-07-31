@@ -66,6 +66,8 @@ Today Ossein intentionally stays small:
   through `SetNotFoundHandler` and `SetMethodNotAllowedHandler`;
 - `WriteError` for rendering the application's error contract from plain
   `net/http` middleware, plus the exported `ErrorEnvelope`;
+- a `middleware` package with panic recovery, access logging, and security
+  headers;
 - typed environment configuration with defaults and required values;
 - optional dependency-free `.env` loading with exported-variable precedence;
 - standard-library `log/slog` integration;
@@ -368,6 +370,48 @@ err := app.ServeTLS(ctx, server, "cert.pem", "key.pem")
 // composed with the standard library.
 err := app.ServeListener(ctx, server, tls.NewListener(listener, tlsConfig))
 ```
+
+## Standard middleware
+
+The `middleware` package provides what a service needs but should not have to
+write. Register it outermost first:
+
+```go
+import "github.com/LoonY20/ossein/middleware"
+
+app.Use(
+    middleware.Recover(),
+    middleware.AccessLog(middleware.SkipPaths("/healthz", "/readyz")),
+    middleware.SecurityHeaders(),
+)
+```
+
+`Recover` turns a panic into a structured `500` through the application's
+`ErrorHandler`, so it matches every other error the API reports. The panic value
+is never sent to the client; it is logged with a stack trace through the
+request-scoped logger. A response already committed is left alone, and
+`http.ErrAbortHandler` still passes through.
+
+`AccessLog` writes one line per request using the status and size Ossein already
+tracks, so they are the values actually sent — including those written by the error
+handler or the not-found fallback. The level follows the outcome: `5xx` at error,
+`4xx` at warn, the rest at info.
+
+`SecurityHeaders` sets `X-Content-Type-Options`, `X-Frame-Options`, and
+`Referrer-Policy` before the handler runs, so error responses carry them too. A
+value already set is never overwritten, and `SecurityHeaderValues` overrides or
+adds one — an empty value removes a default:
+
+```go
+middleware.SecurityHeaders(middleware.SecurityHeaderValues(map[string]string{
+    "X-Frame-Options":           "SAMEORIGIN",
+    "Strict-Transport-Security": "max-age=63072000",
+}))
+```
+
+`Content-Security-Policy` and `Strict-Transport-Security` are deliberately not
+defaults: a useful CSP depends on what the application serves, and HSTS sent from
+a host that is not fully HTTPS causes lasting problems.
 
 ## Route groups
 

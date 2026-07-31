@@ -79,6 +79,14 @@ Ossein uses semantic versioning for published releases.
   default would be skipped and the zero value then reported as invalid
 - `ossein.NewValues` wraps a `url.Values`, so a bind method can be tested directly
   without building a request
+- a `middleware` package with the standard middleware a service should not have to
+  write: `Recover` renders a panic as a structured 500 through the application's
+  error handler, logging the value and stack through the request-scoped logger and
+  leaving a committed response alone; `AccessLog` writes one line per request from
+  the status and size Ossein already tracks, at a level that reflects the outcome,
+  with `SkipPaths` for health probes; `SecurityHeaders` sets conservative defaults
+  before the handler runs, so they cover error responses too, without overriding a
+  value already set
 
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error

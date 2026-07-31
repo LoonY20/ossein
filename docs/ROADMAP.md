@@ -129,14 +129,17 @@ The initial direction is to integrate proven Go database tooling instead of buil
 
 Goal: make Ossein useful for real backend services.
 
-- [ ] panic recovery middleware with structured 500 responses
-- [ ] access-log middleware built on the response status and size tracking
+- [x] panic recovery middleware with structured 500 responses
+      (`middleware.Recover`)
+- [x] access-log middleware built on the response status and size tracking
+      (`middleware.AccessLog`)
+- [x] security headers middleware (`middleware.SecurityHeaders`)
 - [ ] CORS middleware, including `OPTIONS` preflight short-circuiting
       (today a preflight for a registered route answers `405` in plain text)
 - [ ] request timeout middleware that preserves `ResponseWriter` tracking and
       renders through the error handler — `http.TimeoutHandler` replaces the
       writer, silently disabling `Written()` and the already-committed guard
-- [ ] request body limit and security headers middleware
+- [ ] request body limit middleware
 - [ ] detached background context preserving the request ID and request-scoped
       logger, for deferred work and future queue workers
 - [ ] driver-neutral SQL error classification: unique violation, deadlock,
