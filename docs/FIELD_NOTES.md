@@ -416,7 +416,7 @@ on `ResponseController`, all of which must keep `ResponseWriter` tracking intact
 
 ## P3 — Sharp edges and correctness risks
 
-### 11. `http.TimeoutHandler` silently defeats response tracking
+### 11. `http.TimeoutHandler` silently defeats response tracking — RESOLVED
 
 Because the framework ships no timeout middleware, the natural move is
 `http.TimeoutHandler`. Inside it, the handler no longer sees an
@@ -434,6 +434,46 @@ most obvious standard-library tool for the job.
 **Proposal.** Ship a timeout middleware that preserves the wrapper and renders
 through the `ErrorHandler` (504 in the standard envelope), and document the
 `http.TimeoutHandler` interaction explicitly.
+
+**Resolution.** `middleware.Timeout` exposes `Unwrap`, so `ResponseWriterFrom`,
+`http.ResponseController`, the committed-response guard, and the access log's status
+all reach through it, and a streaming handler can still flush — the things the
+standard library's version breaks by substituting a buffer. The 504 renders through
+the application's error handler.
+
+Two things it has to get right, and neither was obvious. The handler runs on another
+goroutine, so a panic there must be forwarded to the request goroutine or it takes
+the process down instead of being recovered; a panic arriving after the deadline is
+logged rather than swallowed, which is what the standard library does with it.
+
+And rejecting late writes cannot be keyed on the middleware observing the deadline.
+The first version selected on "handler finished" against "deadline passed", and Go
+picks randomly when both are ready — so a handler that deliberately ignored
+cancellation won the race often enough that a concurrency test caught a `200` where
+a `504` was required. Rejection is keyed on the context deadline itself, which makes
+it deterministic regardless of scheduling.
+
+Review then found that guarding the writes was not enough, and that the claim they
+were fully serialised was wrong. Embedding the response writer promoted `Header()`
+past the lock, so rendering the 504 — which sets a `Content-Type` — could write the
+header map concurrently with a handler answering in JSON. That is a fatal concurrent
+map write, not a panic, so no recovery is possible and the process dies; and it needs
+only a handler whose duration lands near the deadline, which is what a timeout set
+near p99 produces by definition. The handler now mutates a private header map copied
+across when it commits, which is the one place this middleware has to adopt the
+standard library's approach — while still exposing the writer through `Unwrap`, so
+tracking, flushing, and hijacking keep working.
+
+Two more from the same pass: a client disconnect was reported as a `504`, inflating
+the metric the middleware exists to produce, and a timeout response was written into
+a connection a handler had hijacked. Both are now distinguished. The late-panic
+reporter also parked on a channel forever when the handler never returned, leaking
+two goroutines per hung request rather than the one that is unavoidable — the
+handler goroutine now reports its own late panic instead.
+
+hooksink's probe was inverted: it now asserts that `http.TimeoutHandler` still hides
+the writer, which is the standing reason to prefer the framework's, and that the
+framework's keeps tracking, flushing, and the error contract.
 
 ### 12. `cache.Store` has no atomic claim operation
 

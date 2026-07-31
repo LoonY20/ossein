@@ -12,9 +12,11 @@
 //		middleware.AccessLog(),
 //		middleware.Recover(),
 //		middleware.SecurityHeaders(),
+//		middleware.Timeout(15*time.Second),
 //	)
 //
 // AccessLog goes outside Recover on purpose. A middleware only observes a status
 // written below it, so the other order logs a panicking request with the status it
-// had before recovery rather than the 500 the client received.
+// had before recovery rather than the 500 the client received. Timeout goes inside
+// Recover, so a panic it forwards from the handler's goroutine is still caught.
 package middleware

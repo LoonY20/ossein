@@ -6,16 +6,49 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	ossein "github.com/LoonY20/ossein"
 	"github.com/LoonY20/ossein/middleware"
 )
 
-func logCapture() (*slog.Logger, *bytes.Buffer) {
-	var buffer bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return logger, &buffer
+// syncBuffer collects log output safely. A plain bytes.Buffer is not safe for
+// concurrent use, and the timeout middleware logs from the handler's goroutine while
+// a test reads what has been recorded so far.
+type syncBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *syncBuffer) Write(content []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(content)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
+func (b *syncBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Len()
+}
+
+func (b *syncBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buffer.Reset()
+}
+
+func logCapture() (*slog.Logger, *syncBuffer) {
+	buffer := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return logger, buffer
 }
 
 func TestAccessLogRecordsStatusAndSize(t *testing.T) {
