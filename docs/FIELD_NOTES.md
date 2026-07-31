@@ -119,9 +119,18 @@ therefore still performs the real dispatch, and only the response is watched:
 distinguishes a routing miss from a matched handler answering 404 itself, and
 leaves subtree redirects and path cleaning untouched.
 
+A later review pass replaced that mechanism: `Request.Pattern` is a mutable field
+on the shared request, so a handler delegating to another `ServeMux` clears it and
+the interception then discarded the outer handler's writes while reporting success.
+Each registered route now records the match itself, which no nested mux, request
+copy, or `GODEBUG=httpmuxgo121` setting can undo.
+
 The writer that watches for misses exposes `Unwrap`, and `ResponseWriterFrom`
 now follows `Unwrap` chains, so the committed-response guard and server-sent
-events keep working through it. That also partly addresses item 11 below.
+events keep working through it. This does **not** address item 11: a re-run of
+that probe confirms `ResponseWriterFrom` still reports nothing inside
+`http.TimeoutHandler`, because the standard library's timeout writer does not
+expose `Unwrap`. Only wrappers that follow the convention become transparent.
 
 ### 3. Middleware cannot use the framework's error model — RESOLVED
 
