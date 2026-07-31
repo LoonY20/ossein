@@ -227,7 +227,7 @@ buffer whole invalid bodies: a client could force the full configured limit to b
 read for input that is malformed at byte one. `BindJSON` now streams unless the
 raw body was already taken.
 
-### 5. No form or multipart binding
+### 5. No form or multipart binding — RESOLVED
 
 `Context` binds JSON only. Form and file endpoints drop straight to `net/http`,
 losing the shared body limit, the Content-Type check, and the `Validatable`
@@ -240,6 +240,47 @@ form story at all is a conspicuous hole.
 **Proposal.** `BindForm(target)` and `BindMultipart(target, maxMemory)` with the
 same guarantees as `BindJSON`: media-type enforcement, the app-wide body limit,
 and automatic `Validate()`.
+
+**Resolution.** `BindForm` covers both media types, so the separate
+`BindMultipart` was unnecessary — the Content-Type already says which parser to
+use, and `maxMemory` is the body limit.
+
+The shape of the API was decided by a constraint rather than taste: reflection is
+not allowed on the request path, so struct tags were never an option. Targets
+implement `FormBindable` with an explicit `BindForm(*Form) error`, mirroring the
+existing `Validatable` contract, and `Form` provides typed accessors that record
+field-level errors into the usual `ValidationError`. A bind method reads as a
+list of assignments rather than a wall of `strconv` calls, and the mapping stays
+ordinary Go.
+
+One deliberate asymmetry with `BindJSON`: an absent `Content-Type` is rejected.
+Decoding JSON validates the format on the way through, so guessing is safe there;
+parsing a query string almost never fails, so an unlabelled body of any shape
+would bind as silently empty fields — the very misleading validation error this
+item is about.
+
+hooksink's form file dropped from 137 lines to 108, its hand-written integer
+parser is gone, and its probe asserting that JSON on a form endpoint was *not*
+rejected now asserts the `415`.
+
+Review made this the most instructive item so far, because `form.go` had **100%
+statement coverage** and mutation testing still showed 9 of 16 single-line
+mutations surviving. Three mattered: nothing pinned that only the body is read
+(so a refactor to `Request.Form` would have let a query parameter satisfy a body
+field), nothing pinned the limit the no-temp-file guarantee rests on, and the test
+named "reports type errors before validating" could not tell the two orderings
+apart, because the fixture's rule happened to accept the zero value a type error
+produces. Coverage measures lines executed, not claims verified.
+
+Two real defects came with it. `Float64` accepted `NaN` and infinities, which
+parse fine but make every comparison in an application's rules false — a range
+check silently passed, and encoding the value afterwards produced a 500 from a
+twelve-byte body, so `BindForm` was strictly weaker than `BindJSON`, which rejects
+those outright. And delegating to `Request.ParseForm` meant a correctly labelled
+urlencoded body was ignored on `DELETE`, reporting its fields as missing — the
+exact failure the media-type strictness above was justified by — while
+`WithMaxBindBytes` above 10 MB was silently shadowed by the standard library's own
+cap and surfaced as a `400`. Parsing the already-capped bytes directly fixed both.
 
 ### 6. No query-string binding or helpers
 

@@ -58,8 +58,10 @@ structured JSON errors, an owned server lifecycle — does not currently hold.
 - [x] raw request-body access that composes with `BindJSON`, for signed payloads
       such as webhook HMACs (`Context.Body`, read once and cached under the
       configured limit)
-- [ ] form and multipart binding with `BindJSON`'s guarantees: media-type
-      enforcement, shared body limit, automatic `Validate()`
+- [x] form and multipart binding with `BindJSON`'s guarantees: media-type
+      enforcement, shared body limit, automatic `Validate()` (`BindForm` and the
+      explicit `FormBindable` contract, so the request path stays
+      reflection-free)
 - [ ] query-string helpers and `BindQuery`
 - [ ] response helpers beyond `JSON` and `NoContent`: redirect, text, HTML,
       file, and server-sent events

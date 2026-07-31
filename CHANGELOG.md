@@ -51,6 +51,20 @@ Ossein uses semantic versioning for published releases.
   `ParseForm`. `BindJSON` keeps streaming when the raw body was not taken, so an
   invalid body is still abandoned at its first syntax error rather than read up
   to the limit
+- `Context.BindForm` binds `application/x-www-form-urlencoded` and
+  `multipart/form-data` requests with the guarantees `BindJSON` already had:
+  media-type enforcement (`415`), the shared `WithMaxBindBytes` limit, and an
+  automatic `Validate()`. Targets implement `FormBindable` with an explicit
+  `BindForm(*ossein.Form) error` method, so no reflection enters the request
+  path, and `Form` provides typed accessors (`Required`, `Int`, `Bool`,
+  `RequiredFile`, …) that record field-level errors into the usual
+  `ValidationError`. Only the request body is read, so a field can never be
+  satisfied from the query string; the body is parsed directly rather than through
+  `Request.ParseForm`, which ignores bodies on methods other than POST, PUT, and
+  PATCH and imposes its own 10 MB cap. Multipart parts are held in memory under
+  the same body limit, so nothing is spilled to a temporary file, and the number
+  of urlencoded fields is capped because the body limit does not bound the size of
+  the parsed form
 
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error
