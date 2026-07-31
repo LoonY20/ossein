@@ -56,6 +56,8 @@ Today Ossein intentionally stays small:
   and a configurable body size limit;
 - raw body access through `Context.Body` that composes with `BindJSON`, for
   signed payloads such as webhook HMACs;
+- form and multipart binding through an explicit `FormBindable` contract, with
+  typed accessors, file uploads, and no reflection on the request path;
 - response status and size tracking through a wrapped `http.ResponseWriter`;
 - validation through an explicit `Validate() error` contract;
 - field-level `ValidationError` responses;
@@ -503,6 +505,70 @@ func receive(c *ossein.Context) error {
 
 `Body` does not check `Content-Type`, since a raw body may be anything, and it
 leaves the request body readable for helpers such as `ParseForm`.
+
+### Forms and file uploads
+
+`BindForm` handles `application/x-www-form-urlencoded` and `multipart/form-data`
+with the same guarantees: the media type is enforced with a `415`, the body limit
+is shared, and `Validate` runs automatically. Because the request path stays
+free of reflection, binding is an explicit method rather than struct tags:
+
+```go
+type ReplayRequest struct {
+    Event  string
+    Limit  int
+    DryRun bool
+}
+
+func (r *ReplayRequest) BindForm(form *ossein.Form) error {
+    r.Event = form.Required("event")
+    r.DryRun = form.Bool("dry_run")
+    r.Limit = form.Int("limit")
+    if !form.Has("limit") {
+        r.Limit = 10
+    }
+    return nil
+}
+
+func replay(c *ossein.Context) error {
+    var request ReplayRequest
+    if err := c.BindForm(&request); err != nil {
+        return err
+    }
+    return c.JSON(http.StatusOK, request)
+}
+```
+
+Accessors record field-level errors instead of returning them, so a bind method
+reads as a list of assignments. `Required`, `Int`, `Int64`, `Float64`, and `Bool`
+report a malformed value against its field; `Has` distinguishes an absent field
+from an empty one; `AddError` adds an application rule. Those errors are reported
+before `Validate` runs, so a malformed value is not also blamed for breaking a
+rule that never saw it.
+
+Uploads come through `File`, `RequiredFile`, and `Files`, which return
+`*multipart.FileHeader`. Parts are held in memory under the same body limit, so
+nothing is written to a temporary file:
+
+```go
+func (r *BulkRequest) BindForm(form *ossein.Form) error {
+    header := form.RequiredFile("deliveries")
+    if header == nil {
+        return nil
+    }
+    file, err := header.Open()
+    if err != nil {
+        return err
+    }
+    defer file.Close()
+    // ...
+    return nil
+}
+```
+
+Unlike `BindJSON`, `BindForm` rejects an absent `Content-Type`: decoding JSON
+validates the format as it goes, while a query-string parse almost never fails,
+so an unlabelled body would bind as silently empty fields.
 
 ## Standard Go escape hatch
 
