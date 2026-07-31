@@ -90,6 +90,9 @@ Today Ossein intentionally stays small:
 - composed application command handling for migrations and seeders;
 - backend-neutral cache contract, concurrency-safe in-memory driver, and typed
   JSON/remember helpers;
+- a bounded in-process job queue with a worker pool, per-name handlers, retries
+  with backoff, load shedding through sentinel errors, and a drain on shutdown,
+  behind an `Enqueuer` interface a durable driver can replace;
 - JSON response helpers;
 - blocking server start with `Run`, with conservative default timeouts;
 - context-aware graceful shutdown with `RunContext`;
@@ -370,6 +373,96 @@ err := app.ServeTLS(ctx, server, "cert.pem", "key.pem")
 // An already-bound listener: socket activation, an ephemeral test port, or TLS
 // composed with the standard library.
 err := app.ServeListener(ctx, server, tls.NewListener(listener, tlsConfig))
+```
+
+## Background jobs
+
+Work that a request should not wait for — a webhook fan-out, a thumbnail, an
+email — belongs behind a queue. `queue.Memory` is a bounded in-process queue with
+a worker pool, and `queue.Register` ties it into the application lifecycle:
+
+```go
+work := queue.NewMemory(
+    queue.WithLogger(logger),
+    queue.WithWorkers(4),
+    queue.WithBuffer(256),
+    queue.WithMaxAttempts(3),
+)
+
+work.Handle("email.welcome", func(ctx context.Context, job queue.Job) error {
+    var payload WelcomeEmail
+    if err := json.Unmarshal(job.Payload, &payload); err != nil {
+        return err
+    }
+    return mailer.Send(ctx, payload)
+})
+
+// Starts the workers on app start and drains in-flight jobs on shutdown, and
+// registers the queue as queue.Enqueuer in the container.
+if err := queue.Register(app, work); err != nil {
+    return err
+}
+```
+
+A handler takes a `context.Context` and a `Job`, the same shape as an HTTP
+handler, and `Job.Payload` is `[]byte`, so the encoding stays the
+application's choice. `EnqueueJSON` covers the common one:
+
+```go
+func (h *Signups) Create(c *ossein.Context) error {
+    // ... create the user ...
+
+    if err := h.work.EnqueueJSON(c.Context(), "email.welcome", WelcomeEmail{
+        To: user.Email,
+    }); err != nil {
+        return err
+    }
+    return c.JSON(http.StatusAccepted, user)
+}
+```
+
+Handlers depend on the `queue.Enqueuer` interface rather than on `*queue.Memory`,
+so a durable driver can replace it later without touching call sites:
+
+```go
+type Signups struct {
+    work queue.Enqueuer
+}
+```
+
+A full queue is back-pressure, not a server fault, and a stopped one is not
+either. Both are sentinel errors, so an application decides the status code:
+
+```go
+if err := h.work.Enqueue(ctx, job); err != nil {
+    if errors.Is(err, queue.ErrFull) || errors.Is(err, queue.ErrClosed) {
+        return ossein.NewHTTPError(http.StatusServiceUnavailable, "busy",
+            "Service is busy; retry later").WithCause(err)
+    }
+    return err
+}
+```
+
+A job that returns an error is retried with a backoff, up to `WithMaxAttempts`,
+after which `WithFailureHandler` sees it — that is where a dead-letter table or an
+alert goes. A job that panics becomes an error on the same path instead of taking
+its worker down. A job name with no registered handler is refused by `Enqueue`,
+where the caller can still return an error, rather than disappearing into a log
+line. `Stats` reports queue depth and processed, failed, and refused counts,
+which makes a useful health endpoint.
+
+In-process means in-memory: pending jobs do not survive a crash or a kill that
+outruns the shutdown timeout. That is the right trade-off for work that can be
+retried from its source — a webhook the provider will redeliver — and the wrong
+one for work that must not be lost, which needs a durable driver behind the same
+`Enqueuer` interface.
+
+Background work has no request to inherit a logger from.
+`ossein.ContextWithLogger` puts one into a context, so a worker logs through the
+same handler as the rest of the application:
+
+```go
+ctx := ossein.ContextWithLogger(context.Background(), logger)
 ```
 
 ## Standard middleware

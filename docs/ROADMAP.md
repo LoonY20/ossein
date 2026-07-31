@@ -146,7 +146,9 @@ Goal: make Ossein useful for real backend services.
 - [ ] private network access preflight headers, which Chrome requires for a public
       page calling a private-network service
 - [ ] detached background context preserving the request ID and request-scoped
-      logger, for deferred work and future queue workers
+      logger, for deferred work and queue workers — `ContextWithLogger` covers a
+      worker's own logger, but a job still cannot be correlated with the request
+      that enqueued it
 - [ ] driver-neutral SQL error classification: unique violation, deadlock,
       serialization failure (today applications string-match driver messages)
 - [x] cache contract
@@ -161,11 +163,17 @@ Goal: make Ossein useful for real backend services.
       driven by traffic, so a process idle after a burst holds expired entries
       until its next write
 - [ ] distributed cache driver
-- [ ] queues and workers with lifecycle-managed graceful shutdown
-- [ ] database-backed queue driver on `database/sql` (`SKIP LOCKED`)
+- [x] queues and workers with lifecycle-managed graceful shutdown
+      (`queue.Memory`, `queue.Register`), behind an `Enqueuer` interface so a
+      durable driver can replace the in-memory one without touching call sites
+- [ ] database-backed queue driver on `database/sql` (`SKIP LOCKED`) — the
+      in-memory driver loses pending jobs on a crash, which is fine only for work
+      whose source retries
 - [ ] `ossein queue:work` application command
-- [ ] retries and backoff
-- [ ] failed jobs / dead-letter handling
+- [x] retries and backoff (`WithMaxAttempts`, `WithBackoff`; a panicking job
+      becomes an error on the retry path instead of killing its worker)
+- [ ] failed jobs / dead-letter handling — `WithFailureHandler` is the hook;
+      persistence behind it is still the application's
 - [ ] scheduler
 - [ ] events
 - [ ] mail

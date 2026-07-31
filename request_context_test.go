@@ -2,6 +2,7 @@ package ossein
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,59 @@ func TestRequestContextAddsRequestIDAndLogger(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected log output to contain %q, got %q", expected, output)
 		}
+	}
+}
+
+func TestContextWithLoggerIsFoundByLoggerFromContext(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	ctx := ContextWithLogger(context.Background(), logger)
+
+	found := LoggerFromContext(ctx)
+	if found != logger {
+		t.Fatalf("LoggerFromContext returned %p, want the logger that was stored (%p)", found, logger)
+	}
+
+	// The point of storing it is that background code logs through the
+	// application's handler rather than through slog.Default.
+	found.Info("worker started")
+	if !strings.Contains(logs.String(), "worker started") {
+		t.Fatalf("log output = %q, want the message written through the stored handler", logs.String())
+	}
+}
+
+// TestContextWithLoggerIgnoresNilLogger pins the documented behavior: a nil
+// logger returns the same context, rather than wrapping it in a node holding a
+// typed nil that every reader would then have to defend against.
+func TestContextWithLoggerIgnoresNilLogger(t *testing.T) {
+	type marker struct{}
+
+	parent := context.WithValue(context.Background(), marker{}, "kept")
+	ctx := ContextWithLogger(parent, nil)
+
+	if ctx != parent {
+		t.Fatal("expected the parent context itself, not a wrapper around it")
+	}
+	if LoggerFromContext(ctx) != slog.Default() {
+		t.Fatal("expected the slog.Default fallback for a context with no logger")
+	}
+	LoggerFromContext(ctx).Info("still usable")
+}
+
+func TestContextWithLoggerAcceptsNilContext(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	//lint:ignore SA1012 the nil context is the case under test.
+	ctx := ContextWithLogger(nil, logger) //nolint:staticcheck
+	if ctx == nil {
+		t.Fatal("ContextWithLogger returned a nil context")
+	}
+	if LoggerFromContext(ctx) != logger {
+		t.Fatal("logger was not stored on the substituted background context")
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("ctx.Err() = %v, want nil for a background context", err)
 	}
 }
 

@@ -415,7 +415,7 @@ failure modes are concurrency, ordering, and security rather than logic: almost 
 real defect found here was invisible to a passing test suite at full statement
 coverage, and only mutation testing surfaced it.
 
-### 8. No queue or worker layer
+### 8. No queue or worker layer — RESOLVED
 
 Acknowledging a webhook in milliseconds and processing it afterwards required
 hand-writing a 210-line file: bounded channel, worker pool, retry with backoff,
@@ -424,6 +424,31 @@ counters. None of it was application-specific.
 
 This is already Phase 4 on the roadmap; the note here is only that it is the
 single largest block of framework-shaped code an application must supply today.
+
+**Resolution.** The `queue` package. `queue.Memory` is a bounded queue with a
+worker pool, per-job-name handlers, retries with backoff, a failure hook, and
+`Stats`; `queue.Register` wires it into the lifecycle. `hooksink`'s 211-line
+`queue.go` is gone, replaced by a `NewMemory` call and two `Handle` registrations.
+
+Three things came out of writing it that the hand-rolled version got wrong, and
+they are the reason this belongs in the framework rather than in each application:
+
+- **Enqueue racing shutdown panicked.** `close(jobs)` followed by a send is
+  `send on closed channel` — a crash, not an error. The fix is an `RWMutex` held
+  across the send and taken exclusively by `Stop`. Found by a test written for
+  exactly this, not by the suite that already passed.
+- **Back-pressure and shutdown are not server faults.** `ErrFull` and `ErrClosed`
+  are sentinels precisely so an application can answer `503`. Without them, the
+  natural code path reports a busy queue as a `500`.
+- **A panicking job took the worker down.** With four workers, four bad payloads
+  silently drain the pool. Recovering into an error puts it on the retry path
+  instead, where the failure handler can see it.
+
+The durability trade-off is documented rather than hidden: pending jobs do not
+survive a crash. That is correct for work whose source will retry (a webhook the
+provider redelivers) and wrong for work that must not be lost — which is what the
+`Enqueuer` interface is for. A durable driver is a separate step; the contract
+that lets it drop in without touching call sites is here now.
 
 ### 9. Typed config handles only scalars
 
