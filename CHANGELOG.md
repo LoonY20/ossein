@@ -58,8 +58,13 @@ Ossein uses semantic versioning for published releases.
   `BindForm(*ossein.Form) error` method, so no reflection enters the request
   path, and `Form` provides typed accessors (`Required`, `Int`, `Bool`,
   `RequiredFile`, …) that record field-level errors into the usual
-  `ValidationError`. Multipart parts are held in memory under the same body
-  limit, so nothing is spilled to a temporary file
+  `ValidationError`. Only the request body is read, so a field can never be
+  satisfied from the query string; the body is parsed directly rather than through
+  `Request.ParseForm`, which ignores bodies on methods other than POST, PUT, and
+  PATCH and imposes its own 10 MB cap. Multipart parts are held in memory under
+  the same body limit, so nothing is spilled to a temporary file, and the number
+  of urlencoded fields is capped because the body limit does not bound the size of
+  the parsed form
 
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error

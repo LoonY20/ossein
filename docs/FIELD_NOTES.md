@@ -263,6 +263,25 @@ hooksink's form file dropped from 137 lines to 108, its hand-written integer
 parser is gone, and its probe asserting that JSON on a form endpoint was *not*
 rejected now asserts the `415`.
 
+Review made this the most instructive item so far, because `form.go` had **100%
+statement coverage** and mutation testing still showed 9 of 16 single-line
+mutations surviving. Three mattered: nothing pinned that only the body is read
+(so a refactor to `Request.Form` would have let a query parameter satisfy a body
+field), nothing pinned the limit the no-temp-file guarantee rests on, and the test
+named "reports type errors before validating" could not tell the two orderings
+apart, because the fixture's rule happened to accept the zero value a type error
+produces. Coverage measures lines executed, not claims verified.
+
+Two real defects came with it. `Float64` accepted `NaN` and infinities, which
+parse fine but make every comparison in an application's rules false — a range
+check silently passed, and encoding the value afterwards produced a 500 from a
+twelve-byte body, so `BindForm` was strictly weaker than `BindJSON`, which rejects
+those outright. And delegating to `Request.ParseForm` meant a correctly labelled
+urlencoded body was ignored on `DELETE`, reporting its fields as missing — the
+exact failure the media-type strictness above was justified by — while
+`WithMaxBindBytes` above 10 MB was silently shadowed by the standard library's own
+cap and surfaced as a `400`. Parsing the already-capped bytes directly fixed both.
+
 ### 6. No query-string binding or helpers
 
 Every list endpoint hand-parses and range-checks `page`, `per_page`, and filters

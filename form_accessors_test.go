@@ -208,17 +208,53 @@ func TestBindFormRejectsAMalformedContentType(t *testing.T) {
 	}
 }
 
-// TestBindFormReportsAnUnparseableQueryString covers ParseForm's own failure
-// path, which the URL rather than the body triggers.
-func TestBindFormReportsAnUnparseableQueryString(t *testing.T) {
+// TestBindFormIgnoresAnUnparseableQueryString keeps a bad query string from
+// failing a bind that only reads the body. Routing through Request.ParseForm made
+// the two share a failure, and the reported error blamed the body.
+func TestBindFormIgnoresAnUnparseableQueryString(t *testing.T) {
+	var mode string
 	app := New()
 	app.Post("/", func(c *Context) error {
-		return c.BindForm(&ruleBinder{})
+		probe := &modeCapture{mode: &mode}
+		if err := c.BindForm(probe); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
 	})
 
 	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("mode=fast"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.URL.RawQuery = "%zz"
+
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body %q)", response.Code, response.Body.String())
+	}
+	if mode != "fast" {
+		t.Fatalf("mode = %q, want the body value", mode)
+	}
+}
+
+type modeCapture struct {
+	mode *string
+}
+
+func (m *modeCapture) BindForm(form *Form) error {
+	*m.mode = form.String("mode")
+	return nil
+}
+
+// TestBindFormReportsAnUnparseableBody covers a body the query parser rejects.
+func TestBindFormReportsAnUnparseableBody(t *testing.T) {
+	app := New()
+	app.Post("/", func(c *Context) error {
+		return c.BindForm(&ruleBinder{})
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("mode=%zz"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	response := httptest.NewRecorder()
 	app.ServeHTTP(response, request)

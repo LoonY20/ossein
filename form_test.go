@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -30,10 +31,12 @@ func (r *replayRequest) BindForm(form *Form) error {
 	return nil
 }
 
+// Validate deliberately rejects the zero value, so a test that a type error is
+// reported *instead of* a rule failure can actually tell the two orderings apart.
 func (r *replayRequest) Validate() error {
 	errs := NewValidationError()
-	if r.Limit < 0 || r.Limit > 100 {
-		errs.Add("limit", "must be between 0 and 100")
+	if r.Limit < 1 || r.Limit > 100 {
+		errs.Add("limit", "must be between 1 and 100")
 	}
 	return errs.OrNil()
 }
@@ -171,7 +174,7 @@ func TestBindFormReportsTypeErrorsBeforeValidating(t *testing.T) {
 	if !strings.Contains(body, `"limit"`) {
 		t.Fatalf("body = %q, want an error on the limit field", body)
 	}
-	if strings.Contains(body, "between 0 and 100") {
+	if strings.Contains(body, "between 1 and 100") {
 		t.Fatalf("body = %q, want the type error only, not the validation rule", body)
 	}
 }
@@ -187,7 +190,7 @@ func TestBindFormRunsValidationAfterBinding(t *testing.T) {
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", response.Code)
 	}
-	if !strings.Contains(response.Body.String(), "between 0 and 100") {
+	if !strings.Contains(response.Body.String(), "between 1 and 100") {
 		t.Fatalf("body = %q, want the validation rule", response.Body.String())
 	}
 }
@@ -213,6 +216,9 @@ type uploadRequest struct {
 	Event    string
 	Filename string
 	Contents string
+	// spilled records whether the part was backed by a temporary file, which is
+	// how the no-cleanup-needed guarantee is observed.
+	spilled bool
 }
 
 func (r *uploadRequest) BindForm(form *Form) error {
@@ -229,6 +235,10 @@ func (r *uploadRequest) BindForm(form *Form) error {
 		return err
 	}
 	defer file.Close()
+
+	if _, onDisk := file.(*os.File); onDisk {
+		r.spilled = true
+	}
 
 	contents, err := io.ReadAll(file)
 	if err != nil {
@@ -293,6 +303,10 @@ func TestBindFormHandlesMultipartWithFiles(t *testing.T) {
 	}
 	if !strings.Contains(captured.Contents, `{"b":2}`) {
 		t.Fatalf("contents = %q", captured.Contents)
+	}
+	if captured.spilled {
+		t.Fatal("the uploaded part was written to a temporary file; parts must stay " +
+			"in memory so there is nothing to clean up")
 	}
 }
 
