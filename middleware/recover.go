@@ -8,8 +8,9 @@ import (
 	ossein "github.com/LoonY20/ossein"
 )
 
-// stackBufferBytes bounds the stack trace captured for a panic.
-const stackBufferBytes = 8 << 10
+// stackBufferBytes bounds the stack trace captured for a panic, matching the size
+// net/http uses for the same purpose.
+const stackBufferBytes = 64 << 10
 
 // Recover turns a panic in a later handler into a structured 500.
 //
@@ -47,14 +48,42 @@ func Recover() ossein.Middleware {
 				if writer, ok := ossein.ResponseWriterFrom(w); ok && writer.Written() {
 					return
 				}
-				ossein.WriteError(w, r, ossein.NewHTTPError(
-					http.StatusInternalServerError,
-					"internal_error",
-					"Internal Server Error",
-				))
+				respondInternalError(w, r)
 			}()
 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// respondInternalError renders a 500 through the application's error handler, with
+// a plain fallback if that handler is itself what failed.
+//
+// The panic being recovered may have come from the error handler, in which case
+// rendering through it panics again — inside the deferred function, where nothing
+// else can catch it, taking the connection down instead of answering.
+func respondInternalError(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+		if recovered == http.ErrAbortHandler {
+			panic(recovered)
+		}
+		ossein.LoggerFromContext(r.Context()).Error(
+			"the error handler panicked while reporting a panic",
+			"panic", fmt.Sprint(recovered),
+		)
+		if writer, ok := ossein.ResponseWriterFrom(w); ok && writer.Written() {
+			return
+		}
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}()
+
+	ossein.WriteError(w, r, ossein.NewHTTPError(
+		http.StatusInternalServerError,
+		"internal_error",
+		"Internal Server Error",
+	))
 }

@@ -35,6 +35,13 @@ func SkipPaths(paths ...string) AccessLogOption {
 // request, so they are the values actually sent, including those written by the
 // error handler or the not-found fallback after the handler returned.
 //
+// Register it outside Recover. A middleware only observes a status written below
+// it, so the other order reports a panicking request with the status it had before
+// recovery. The line is emitted either way, because logging is deferred.
+//
+// A connection the handler hijacked, such as a websocket upgrade, never reaches
+// the tracked writer, so it is reported as an uncommitted response.
+//
 // The level reflects the outcome: server errors are logged at error level, client
 // errors at warn, everything else at info, so a level filter is a useful triage
 // tool.
@@ -54,18 +61,21 @@ func AccessLog(options ...AccessLogOption) ossein.Middleware {
 			}
 
 			started := time.Now()
-			next.ServeHTTP(w, r)
-			elapsed := time.Since(started)
+			// Deferred so a panic unwinding towards Recover is still logged. On the
+			// normal path this runs at the same point a plain call would.
+			defer func() {
+				status, size := recordedResponse(w)
+				ossein.LoggerFromContext(r.Context()).Log(
+					r.Context(),
+					levelForStatus(status),
+					"request completed",
+					"status", status,
+					"bytes", size,
+					"duration_ms", time.Since(started).Milliseconds(),
+				)
+			}()
 
-			status, size := recordedResponse(w)
-			ossein.LoggerFromContext(r.Context()).Log(
-				r.Context(),
-				levelForStatus(status),
-				"request completed",
-				"status", status,
-				"bytes", size,
-				"duration_ms", elapsed.Milliseconds(),
-			)
+			next.ServeHTTP(w, r)
 		})
 	}
 }

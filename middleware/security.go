@@ -2,29 +2,35 @@ package middleware
 
 import (
 	"net/http"
+	"net/textproto"
 
 	ossein "github.com/LoonY20/ossein"
 )
 
 // SecurityHeaderOption configures the security headers.
-type SecurityHeaderOption func(map[string]string)
+type SecurityHeaderOption func(*securityHeaderOptions)
+
+type securityHeaderOptions struct {
+	headers map[string]string
+}
 
 // SecurityHeaderValues overrides or adds headers. An empty value removes a default,
 // which is how an application opts out of one.
 func SecurityHeaderValues(headers map[string]string) SecurityHeaderOption {
-	return func(current map[string]string) {
+	return func(options *securityHeaderOptions) {
 		for header, value := range headers {
+			canonical := textproto.CanonicalMIMEHeaderKey(header)
 			if value == "" {
-				delete(current, header)
+				delete(options.headers, canonical)
 				continue
 			}
-			current[header] = value
+			options.headers[canonical] = value
 		}
 	}
 }
 
 // defaultSecurityHeaders returns headers that are safe for an API to send
-// unconditionally.
+// unconditionally. The keys are already in canonical form.
 //
 // Content-Security-Policy is deliberately absent: a useful policy depends on what
 // the application serves, and a wrong one breaks pages silently.
@@ -42,23 +48,28 @@ func defaultSecurityHeaders() map[string]string {
 // SecurityHeaders sets conservative response headers before the handler runs, so
 // they apply to error responses and to the not-found fallback as well.
 //
-// A handler that sets one of these headers itself wins, since the values are only
-// applied where the header is not already present.
+// A header already present is never replaced, so a handler or an outer middleware
+// stays in control — including one that deliberately set an empty value, which is
+// distinct from the header being absent.
 func SecurityHeaders(options ...SecurityHeaderOption) ossein.Middleware {
-	headers := defaultSecurityHeaders()
+	settings := securityHeaderOptions{headers: defaultSecurityHeaders()}
 	for _, option := range options {
 		if option != nil {
-			option(headers)
+			option(&settings)
 		}
 	}
+	headers := settings.headers
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			target := w.Header()
 			for header, value := range headers {
-				if target.Get(header) == "" {
-					target.Set(header, value)
+				// Get cannot tell an absent header from one present but empty, and
+				// only the former should be filled in.
+				if _, present := target[header]; present {
+					continue
 				}
+				target[header] = []string{value}
 			}
 			next.ServeHTTP(w, r)
 		})

@@ -356,14 +356,25 @@ and linkr's dropped from 150 lines to 89, leaving only the two middlewares that
 are genuinely specific to it — API-key auth and rate limiting — both of which now
 report through `WriteError` from item 3.
 
-Writing these turned up a lesson about my own tests, not the framework. Two of
-them passed against a deliberately broken implementation: a security-header
-override test that a handler wins by ordering regardless of the guard being
-tested, and a committed-response test that the default error handler's own guard
-already satisfies. Both were rewritten to isolate what they claim — the header set
-by an *outer* middleware, and an error handler that writes unconditionally. Worth
-recording because this is the third time in this document that full statement
-coverage sat next to an assertion that could not fail.
+Writing these turned up more about my own tests than about the framework. Four
+passed against a deliberately broken implementation: a security-header override
+test that a handler wins by ordering regardless of the guard being tested, a
+committed-response test the default error handler's own guard already satisfied, a
+stack-trace test that asserted the log *key* rather than any frame, and a duration
+test that would have accepted zero or the wrong unit. Full statement coverage sat
+next to twenty-two surviving mutants — the third time in this document that
+coverage measured lines rather than claims, and now recorded as a habit to distrust
+rather than three incidents.
+
+Two genuine bugs came out of the same pass. With the ordering this package
+originally documented, a **panicking request was never logged at all**: the panic
+unwinds through the access log on its way to recovery, so the line was skipped for
+exactly the requests that matter most. Logging is now deferred, and `AccessLog`
+belongs *outside* `Recover`, because a middleware only observes a status written
+below it. And recovery double-faulted when the application's own error handler was
+what panicked: rendering the 500 re-entered that handler, which panicked again
+inside the deferred function where nothing could catch it, dropping the connection
+instead of answering. There is now a plain fallback for that case.
 
 CORS and request timeout are still open, and the timeout belongs with item 11:
 `http.TimeoutHandler` is what an application reaches for today, and it is what

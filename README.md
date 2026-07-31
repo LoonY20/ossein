@@ -380,11 +380,15 @@ write. Register it outermost first:
 import "github.com/LoonY20/ossein/middleware"
 
 app.Use(
-    middleware.Recover(),
     middleware.AccessLog(middleware.SkipPaths("/healthz", "/readyz")),
+    middleware.Recover(),
     middleware.SecurityHeaders(),
 )
 ```
+
+`AccessLog` goes outside `Recover` deliberately: a middleware only observes a
+status written below it, so the other order logs a panicking request with the
+status it had *before* recovery rather than the `500` the client received.
 
 `Recover` turns a panic into a structured `500` through the application's
 `ErrorHandler`, so it matches every other error the API reports. The panic value
@@ -392,10 +396,12 @@ is never sent to the client; it is logged with a stack trace through the
 request-scoped logger. A response already committed is left alone, and
 `http.ErrAbortHandler` still passes through.
 
-`AccessLog` writes one line per request using the status and size Ossein already
-tracks, so they are the values actually sent — including those written by the error
-handler or the not-found fallback. The level follows the outcome: `5xx` at error,
-`4xx` at warn, the rest at info.
+`AccessLog` writes one line per request, including a request that panicked, using
+the status and size Ossein already tracks — the values actually sent, including
+those written by the error handler or the not-found fallback. The level follows the
+outcome: `5xx` at error, `4xx` at warn, the rest at info. A hijacked connection,
+such as a websocket upgrade, never reaches the tracked writer and is reported as an
+uncommitted response.
 
 `SecurityHeaders` sets `X-Content-Type-Options`, `X-Frame-Options`, and
 `Referrer-Policy` before the handler runs, so error responses carry them too. A

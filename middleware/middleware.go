@@ -9,8 +9,12 @@
 // Register them application-wide, outermost first:
 //
 //	app.Use(
-//		middleware.Recover(),
 //		middleware.AccessLog(),
+//		middleware.Recover(),
 //		middleware.SecurityHeaders(),
 //	)
+//
+// AccessLog goes outside Recover on purpose. A middleware only observes a status
+// written below it, so the other order logs a panicking request with the status it
+// had before recovery rather than the 500 the client received.
 package middleware
