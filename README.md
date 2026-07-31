@@ -302,11 +302,27 @@ type Config struct {
 }
 ```
 
-A bad list entry says which one it was (`element 2: invalid integer "two"`), and a
-type that rejects a value in its own `UnmarshalText` fails startup rather than
-loading something wrong. `byte` is an alias for `uint8`, so `[]uint8` is the same
-type as `[]byte` and is also treated as a raw value — use a wider element type for a
-list of small numbers.
+A bad list entry says which one it was, counting the fields as written so the number
+matches the value an operator is looking at (`element 3: invalid integer "nope"`). A
+type that rejects a value in its own `UnmarshalText` fails startup rather than loading
+something wrong. `required:"true"` on a list rejects a value that parses to no entries,
+so `ORIGINS=,,` is an error rather than an allowlist that denies everything.
+
+An unset list is `nil` and one set to no entries is an empty slice, so an application
+can tell "not configured" from "configured empty".
+
+Two shapes are worth knowing:
+
+- `byte` is an alias for `uint8`, so `[]uint8` is the same type as `[]byte` and is also
+  the raw value. Use a wider element type for a list of small numbers.
+- a struct without an `env` tag is a nested group of settings, which means a
+  self-parsing struct type such as `time.Time` or `url.URL` needs its tag; without one
+  it is descended into and its own parsing never runs.
+
+URLs are checked for two values `url.Parse` accepts but that are silently useless: an
+empty one, and one like `localhost:8080` where a dropped scheme makes `localhost` the
+scheme and leaves no host, which `JoinPath` then refuses to extend. A URL with a path
+and no scheme stays legal, since a base path is a real thing to configure.
 
 Maps are deliberately not supported: `KEYS=a=1,b=2` needs two separator conventions,
 both arbitrary, so that encoding stays the application's to choose.

@@ -332,3 +332,197 @@ func (r *regionCode) UnmarshalText(text []byte) error {
 		return errUnknownRegion
 	}
 }
+
+// TestLoadConfigParsesListsOfSelfParsingSliceTypes covers the element type that broke
+// the first version of this: net.IP is a []byte that parses itself, so deciding what a
+// list means by kind alone rejected a list of trusted proxies — while a single one
+// loaded fine, which is the kind of inconsistency nobody discovers until deployment.
+func TestLoadConfigParsesListsOfSelfParsingSliceTypes(t *testing.T) {
+	type Config struct {
+		Proxy   net.IP   `env:"PROXY"`
+		Proxies []net.IP `env:"PROXIES"`
+	}
+
+	config, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{
+		"PROXY":   "10.0.0.1",
+		"PROXIES": "10.0.0.1, 10.0.0.2",
+	}))
+	if err != nil {
+		t.Fatalf("LoadConfigFromEnv: %v", err)
+	}
+
+	if config.Proxy.String() != "10.0.0.1" {
+		t.Fatalf("Proxy = %v", config.Proxy)
+	}
+	if len(config.Proxies) != 2 {
+		t.Fatalf("Proxies = %v, want two addresses", config.Proxies)
+	}
+	if config.Proxies[0].String() != "10.0.0.1" || config.Proxies[1].String() != "10.0.0.2" {
+		t.Fatalf("Proxies = %v", config.Proxies)
+	}
+}
+
+// TestLoadConfigRejectsAnEmptyOrSchemeShapedURL covers the two values url.Parse accepts
+// that produce a URL which is silently useless. Both are realistic operator edits of a
+// default like "http://localhost:8080", and both survive to the point where a link is
+// built from them and comes out wrong rather than failing.
+func TestLoadConfigRejectsAnEmptyOrSchemeShapedURL(t *testing.T) {
+	type Config struct {
+		Base *url.URL `env:"BASE_URL" default:"http://localhost:8080"`
+	}
+
+	// The shape a dropped scheme produces: "localhost" is read as the scheme and
+	// "8080" as an opaque body, so the URL has no host and JoinPath discards whatever
+	// is appended to it.
+	_, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{
+		"BASE_URL": "localhost:8080",
+	}))
+	if err == nil {
+		t.Fatal("a scheme-shaped value was accepted as a URL")
+	}
+	if !strings.Contains(err.Error(), `"localhost" is read as a scheme`) {
+		t.Fatalf("error = %v, want it to explain the shape", err)
+	}
+	if !strings.Contains(err.Error(), "http://localhost:8080") {
+		t.Fatalf("error = %v, want it to suggest the corrected value", err)
+	}
+
+	// Set-but-empty bypasses the default tag, which only applies when the variable is
+	// absent, so without this check the field would be a non-nil empty URL.
+	_, err = LoadConfigFromEnv[Config](staticEnv(map[string]string{"BASE_URL": ""}))
+	if err == nil {
+		t.Fatal("an empty value was accepted as a URL")
+	}
+	if !strings.Contains(err.Error(), "Base (BASE_URL): a URL is required") {
+		t.Fatalf("error = %v", err)
+	}
+
+	// A URL with a path but no scheme stays legal: a base path is a real thing to
+	// configure, and unlike the opaque form it extends correctly.
+	relative, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{
+		"BASE_URL": "/api/v1",
+	}))
+	if err != nil {
+		t.Fatalf("a path-only URL should load: %v", err)
+	}
+	if got := relative.Base.JoinPath("links").String(); got != "/api/v1/links" {
+		t.Fatalf("JoinPath = %q", got)
+	}
+}
+
+// TestLoadConfigRequiredListRejectsAValueWithNoEntries closes the hole between the
+// required check and the parse: ",," is not an empty value, so a required allowlist
+// would load with nothing in it and every origin would be denied at runtime instead of
+// the mistake being caught at startup.
+func TestLoadConfigRequiredListRejectsAValueWithNoEntries(t *testing.T) {
+	type Config struct {
+		Origins []string `env:"ORIGINS" required:"true"`
+	}
+
+	_, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{"ORIGINS": " , , "}))
+	if err == nil {
+		t.Fatal("a required list parsed to no entries and was accepted")
+	}
+	if !strings.Contains(err.Error(), "Origins (ORIGINS) is required, but") {
+		t.Fatalf("error = %v", err)
+	}
+
+	// A value with one real entry satisfies it.
+	config, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{
+		"ORIGINS": "https://app.test,",
+	}))
+	if err != nil {
+		t.Fatalf("LoadConfigFromEnv: %v", err)
+	}
+	if len(config.Origins) != 1 {
+		t.Fatalf("Origins = %q", config.Origins)
+	}
+}
+
+// TestLoadConfigDistinguishesAnUnsetListFromAnEmptyOne pins semantics a caller can
+// legitimately read: nil means the variable was never set, an empty non-nil slice means
+// it was set to nothing. Without a test either could silently become the other.
+func TestLoadConfigDistinguishesAnUnsetListFromAnEmptyOne(t *testing.T) {
+	type Config struct {
+		Unset   []string `env:"UNSET"`
+		Emptied []string `env:"EMPTIED"`
+	}
+
+	config, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{"EMPTIED": ","}))
+	if err != nil {
+		t.Fatalf("LoadConfigFromEnv: %v", err)
+	}
+
+	if config.Unset != nil {
+		t.Fatalf("Unset = %#v, want nil for a variable that was never set", config.Unset)
+	}
+	if config.Emptied == nil {
+		t.Fatalf("Emptied = nil, want an empty slice for a variable set to no entries")
+	}
+	if len(config.Emptied) != 0 {
+		t.Fatalf("Emptied = %q, want no entries", config.Emptied)
+	}
+}
+
+// TestLoadConfigNumbersListElementsAsWritten pins which convention the error uses. The
+// alternative — counting surviving entries — would name element 2 for a value whose
+// second field is empty, sending an operator to the wrong place.
+func TestLoadConfigNumbersListElementsAsWritten(t *testing.T) {
+	type Config struct {
+		Ports []int `env:"PORTS"`
+	}
+
+	_, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{"PORTS": ",8080,nope"}))
+	if err == nil {
+		t.Fatal("expected the bad element to be reported")
+	}
+	if !strings.Contains(err.Error(), `element 3: invalid integer "nope"`) {
+		t.Fatalf("error = %v, want the position as written in the value", err)
+	}
+}
+
+// TestLoadConfigKeepsByteSlicesExactly guards the claim that []byte is the raw value:
+// not trimmed, not split, not reordered.
+func TestLoadConfigKeepsByteSlicesExactly(t *testing.T) {
+	type Config struct {
+		Key     []byte   `env:"KEY"`
+		Nibbles []nibble `env:"NIBBLES"`
+	}
+
+	const raw = "  padded , key\t"
+	config, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{
+		"KEY":     raw,
+		"NIBBLES": "1,2,3",
+	}))
+	if err != nil {
+		t.Fatalf("LoadConfigFromEnv: %v", err)
+	}
+	if string(config.Key) != raw {
+		t.Fatalf("Key = %q, want the value byte for byte", config.Key)
+	}
+	// A named byte type is not []byte, so it is a list of numbers. The exact type
+	// comparison is what makes that work.
+	if len(config.Nibbles) != 3 || config.Nibbles[2] != 3 {
+		t.Fatalf("Nibbles = %v, want a list of numbers", config.Nibbles)
+	}
+}
+
+// TestLoadConfigRejectsSlicesOfMaps keeps the message pointed at the element rather
+// than silently accepting a shape with no encoding.
+func TestLoadConfigRejectsSlicesOfMaps(t *testing.T) {
+	type Config struct {
+		Rules []map[string]string `env:"RULES"`
+	}
+
+	_, err := LoadConfigFromEnv[Config](staticEnv(map[string]string{"RULES": "a=b"}))
+	if err == nil {
+		t.Fatal("expected a slice of maps to be rejected")
+	}
+	if !strings.Contains(err.Error(), "element 1: unsupported field type map[string]string") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// nibble is a named byte type: distinct from byte, so a list of them is a list of
+// numbers rather than a raw value.
+type nibble byte

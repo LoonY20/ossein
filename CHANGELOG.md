@@ -148,8 +148,18 @@ Ossein uses semantic versioning for published releases.
   instead of being assigned as its underlying string. `url.URL` and `*url.URL` are
   parsed with `url.Parse`, since `url.URL` implements `BinaryUnmarshaler` rather than
   `TextUnmarshaler` and the general mechanism does not reach it. `[]byte` stays the
-  raw value: a key or a secret must not be split on commas. Maps remain unsupported,
-  deliberately — their environment encoding needs two arbitrary separators
+  raw value: a key or a secret must not be split on commas, and since `byte` is an
+  alias for `uint8` that necessarily covers `[]uint8` too. An element type that parses
+  itself is decided before those rules, which go by kind, so `[]net.IP` — a list of
+  `[]byte` that parse themselves — is a list of addresses rather than a rejected nested
+  list. `required:"true"` on a list now rejects a value that parses to no entries, since
+  `,,` is not an empty value and an allowlist that required entries would otherwise load
+  with none. A URL is rejected when empty or when a dropped scheme leaves it with no
+  host (`localhost:8080` parses as scheme `localhost`), both of which `url.Parse` accepts
+  and neither of which can be joined onto. An unset list is nil and one set to no
+  entries is empty, so "not configured" stays distinguishable from "configured empty".
+  Maps remain unsupported, deliberately — their environment encoding needs two arbitrary
+  separators
 - `ossein.ContextWithLogger` puts a logger into a context that did not come from
   a request, so background work logs through the same handler as the rest of the
   application
