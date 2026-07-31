@@ -218,6 +218,15 @@ delivery size limit is now declared once as `WithMaxBindBytes` on the
 application. Its test that a whitespace-reformatted body fails verification still
 passes, so the exact-bytes guarantee survived the change.
 
+Two things review caught that are worth recording, because both were invisible to
+the tests written for the feature. A failed read was not cached, so a second call
+read *further* into the drained stream and returned a fragment with a nil error —
+the exact corruption this item exists to prevent, since a signature would then be
+checked against partial bytes. And routing `BindJSON` through the cache made it
+buffer whole invalid bodies: a client could force the full configured limit to be
+read for input that is malformed at byte one. `BindJSON` now streams unless the
+raw body was already taken.
+
 ### 5. No form or multipart binding
 
 `Context` binds JSON only. Form and file endpoints drop straight to `net/http`,

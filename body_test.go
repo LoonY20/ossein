@@ -111,14 +111,17 @@ func TestBodyIsReadOnlyOnce(t *testing.T) {
 	var first, second []byte
 	var reads int
 
+	var readsAfterFirst, readsAfterSecond int
 	app.Post("/count", func(c *Context) error {
 		var err error
 		if first, err = c.Body(); err != nil {
 			return err
 		}
+		readsAfterFirst = reads
 		if second, err = c.Body(); err != nil {
 			return err
 		}
+		readsAfterSecond = reads
 		return c.NoContent(http.StatusNoContent)
 	})
 
@@ -137,6 +140,13 @@ func TestBodyIsReadOnlyOnce(t *testing.T) {
 	}
 	if reads == 0 {
 		t.Fatal("expected the body to be read")
+	}
+	// Comparing the two results is not enough on its own: Body reinstates a
+	// reader positioned at the start, so an uncached second call would return
+	// identical bytes. The read count is what proves the cache is used.
+	if readsAfterSecond != readsAfterFirst {
+		t.Fatalf("the second call performed %d further reads; the body must be cached",
+			readsAfterSecond-readsAfterFirst)
 	}
 }
 

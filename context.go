@@ -24,8 +24,11 @@ type Context struct {
 	maxBindBytes int64
 
 	// body caches the request body once it has been read, so raw access and
-	// BindJSON compose instead of competing for a single-use stream.
+	// BindJSON compose instead of competing for a single-use stream. bodyErr is
+	// cached with it: a failed read leaves the stream partially drained, so
+	// retrying would return a fragment rather than the body.
 	body     []byte
+	bodyErr  error
 	bodyRead bool
 }
 
@@ -75,23 +78,36 @@ func (c *Context) NoContent(status int) error {
 // does, so the limit stays in one place.
 //
 // The body is read once and cached, so Body may be called repeatedly and
-// BindJSON still works afterwards. The request body is left readable for
-// standard library helpers such as ParseForm.
+// BindJSON still works afterwards. A failed read is cached too: the stream is
+// partially drained by then, so a retry would return a fragment rather than the
+// body. That also keeps the limit bounding the request rather than each call.
 //
-// Body does not check Content-Type, because a raw body may be anything.
+// The request body is left readable for standard library helpers, so Body may be
+// followed by ParseForm. The reverse order does not work: a helper or middleware
+// that consumes the body without restoring it leaves Body nothing to read.
+//
+// Body does not check Content-Type, because a raw body may be anything. The
+// returned slice backs both the cache and the reinstated request body, so it
+// must not be modified.
 func (c *Context) Body() ([]byte, error) {
 	if c.bodyRead {
-		return c.body, nil
+		return c.body, c.bodyErr
 	}
 	if c.Request == nil || c.Request.Body == nil {
 		c.bodyRead = true
 		return nil, nil
 	}
 
+	// MaxBytesReader takes the writer to signal that the connection should be
+	// closed on overflow, which it does through an unexported method only
+	// *http.response implements. Ossein always wraps the writer, so that signal
+	// is inert here; the standard library still closes an early-closed body.
 	limited := http.MaxBytesReader(c.Response, c.Request.Body, c.bindLimit())
 	raw, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, bindJSONError(err, "Request body could not be read")
+		c.bodyRead = true
+		c.bodyErr = readBodyError(err)
+		return nil, c.bodyErr
 	}
 
 	c.body = raw
@@ -110,14 +126,32 @@ func (c *Context) bindLimit() int64 {
 	return defaultMaxBindBytes
 }
 
+// jsonDecoder reads from the cached body when it has already been taken, and
+// streams otherwise so an invalid body is abandoned at its first syntax error.
+func (c *Context) jsonDecoder() (*json.Decoder, error) {
+	if c.bodyRead {
+		if c.bodyErr != nil {
+			return nil, c.bodyErr
+		}
+		return json.NewDecoder(bytes.NewReader(c.body)), nil
+	}
+	if c.Request == nil || c.Request.Body == nil {
+		return json.NewDecoder(bytes.NewReader(nil)), nil
+	}
+	return json.NewDecoder(
+		http.MaxBytesReader(c.Response, c.Request.Body, c.bindLimit()),
+	), nil
+}
+
 // BindJSON decodes a JSON request body into target.
 // A non-empty Content-Type must be application/json or use a +json suffix.
 // The body is limited to the application's WithMaxBindBytes setting (1 MiB by
 // default) and unknown JSON fields are rejected. If target implements
 // Validatable, validation runs automatically after a successful decode.
 //
-// BindJSON reads through Body, so it may be called after the raw bytes have
-// already been taken.
+// BindJSON decodes the cached body when Body has already been called, so the two
+// compose. Otherwise it streams, which stops at the first syntax error instead of
+// reading a whole invalid body up to the limit.
 func (c *Context) BindJSON(target any) error {
 	if target == nil {
 		return BadRequest("invalid_request", "Request target cannot be nil")
@@ -127,12 +161,10 @@ func (c *Context) BindJSON(target any) error {
 		return err
 	}
 
-	raw, err := c.Body()
+	decoder, err := c.jsonDecoder()
 	if err != nil {
 		return err
 	}
-
-	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(target); err != nil {
@@ -168,6 +200,21 @@ func (c *Context) checkJSONContentType() error {
 		).WithCause(err)
 	}
 	return nil
+}
+
+// readBodyError describes a failed body read without blaming JSON, since Body
+// serves any payload shape.
+func readBodyError(err error) error {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return NewHTTPError(
+			http.StatusRequestEntityTooLarge,
+			"request_too_large",
+			"Request body is too large",
+		).WithCause(err)
+	}
+	return BadRequest("invalid_request_body", "Request body could not be read").
+		WithCause(err)
 }
 
 func bindJSONError(err error, invalidJSONMessage string) error {
