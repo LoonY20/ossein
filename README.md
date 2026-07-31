@@ -435,9 +435,18 @@ app.Group("/api", func(api *ossein.Router) {
 The request context is cancelled at the deadline, so a handler that honours
 cancellation returns on its own; one that does not keeps running in the background
 with its writes discarded. A response already committed is left alone, so a
-streaming handler that overruns keeps what the client received. Scope it to a group
-rather than applying it to long-lived streaming routes, and register it inside
-`Recover`, so a panic it forwards from the handler's goroutine is still caught.
+streaming handler that overruns keeps what the client received, as is a connection
+the handler hijacked. A cancellation for any other reason — a client disconnecting,
+say — is not reported as a timeout.
+
+The handler writes headers to a private map that is copied to the response when it
+commits. That is the one thing not shared with the real response, because a header
+map written from two goroutines risks a fatal concurrent map write when a handler
+finishes near the deadline.
+
+Scope it to a group rather than applying it to long-lived streaming routes, and
+register it inside `Recover`, so a panic it forwards from the handler's goroutine is
+still caught.
 
 ## Route groups
 

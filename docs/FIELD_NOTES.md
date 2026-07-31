@@ -450,9 +450,26 @@ And rejecting late writes cannot be keyed on the middleware observing the deadli
 The first version selected on "handler finished" against "deadline passed", and Go
 picks randomly when both are ready — so a handler that deliberately ignored
 cancellation won the race often enough that a concurrency test caught a `200` where
-a `504` was required. Rejection is now keyed on the context deadline itself, which
-makes it deterministic regardless of scheduling. The guard around the write is what
-keeps the timeout response and a late handler write from interleaving at all.
+a `504` was required. Rejection is keyed on the context deadline itself, which makes
+it deterministic regardless of scheduling.
+
+Review then found that guarding the writes was not enough, and that the claim they
+were fully serialised was wrong. Embedding the response writer promoted `Header()`
+past the lock, so rendering the 504 — which sets a `Content-Type` — could write the
+header map concurrently with a handler answering in JSON. That is a fatal concurrent
+map write, not a panic, so no recovery is possible and the process dies; and it needs
+only a handler whose duration lands near the deadline, which is what a timeout set
+near p99 produces by definition. The handler now mutates a private header map copied
+across when it commits, which is the one place this middleware has to adopt the
+standard library's approach — while still exposing the writer through `Unwrap`, so
+tracking, flushing, and hijacking keep working.
+
+Two more from the same pass: a client disconnect was reported as a `504`, inflating
+the metric the middleware exists to produce, and a timeout response was written into
+a connection a handler had hijacked. Both are now distinguished. The late-panic
+reporter also parked on a channel forever when the handler never returned, leaking
+two goroutines per hung request rather than the one that is unavoidable — the
+handler goroutine now reports its own late panic instead.
 
 hooksink's probe was inverted: it now asserts that `http.TimeoutHandler` still hides
 the writer, which is the standing reason to prefer the framework's, and that the

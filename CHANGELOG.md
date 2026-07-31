@@ -95,10 +95,14 @@ Ossein uses semantic versioning for published releases.
   Ossein response writer, so `Written()` tracking, the committed-response guard, the
   access log's status, `http.ResponseController`, and streaming all keep working. The
   request context is cancelled at the deadline; a handler that ignores it keeps
-  running but its writes are discarded, and rejection is keyed on the deadline rather
-  than on scheduling, so it is deterministic. A panic on the handler's goroutine is
-  forwarded to the request goroutine for `Recover`, and one arriving after the
-  deadline is logged rather than lost
+  running but its writes and header changes are discarded, and rejection is keyed on
+  the deadline rather than on scheduling, so it is deterministic. A cancellation for
+  any other reason, such as a client disconnecting, is not reported as a timeout, and
+  a connection the handler hijacked is left alone. Headers are the one thing not
+  shared with the real response: the handler mutates a private map copied across when
+  it commits, because two goroutines writing one header map risks a fatal concurrent
+  map write. A panic on the handler's goroutine is forwarded to the request goroutine
+  for `Recover`, and one arriving after the deadline is logged rather than lost
 
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error
