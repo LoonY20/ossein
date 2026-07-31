@@ -488,7 +488,7 @@ Twenty-one mutations, one per guard and ordering decision in the package, are no
 each confirmed to fail at least one test. That is a materially different claim from
 the 100% statement coverage this package had while all of the above was true.
 
-### 9. Typed config handles only scalars
+### 9. Typed config handles only scalars — RESOLVED
 
 ```
 []string          ->  ossein: config Origins (ORIGINS): unsupported field type []string
@@ -502,6 +502,50 @@ hand-written splitter that belongs in the framework.
 **Proposal.** Support `[]string` and `[]int` from a comma-separated value, and
 honor `encoding.TextUnmarshaler` as a general escape hatch (that alone covers
 `*url.URL`, `net/netip.Addr`, `slog.Level`, and custom types).
+
+**Resolution.** Lists of any supported element type, `encoding.TextUnmarshaler`, and
+URLs. `linkr` carries its API keys and CORS origins as `[]string`, its level as a
+`slog.Level`, and its public origin as a `*url.URL`; the hand-written splitter is
+down to the one line that splits a `key=owner` pair, which is the application's own
+encoding rather than something the loader should guess at.
+
+Two things the proposal above got wrong:
+
+- **`*url.URL` is not covered by `TextUnmarshaler`.** `url.URL` implements
+  `BinaryUnmarshaler`, not `TextUnmarshaler`, so the general mechanism never reaches it.
+  It is special-cased alongside `time.Duration`, and `url.Parse` reports a bad value
+  better than a byte decoder would.
+- **`[]uint8` cannot be a numeric list.** `byte` is an alias for `uint8`, so `[]byte`
+  and `[]uint8` are one type and no loader can distinguish them. `[]byte` has to win,
+  because splitting a signing key on commas corrupts it. A field declared `[]uint8`
+  hoping for a list of small numbers gets the raw bytes; that is a documented trap
+  with a test, not a decision.
+
+Maps stay unsupported, deliberately. `KEYS=a=1,b=2` needs two separator conventions,
+both arbitrary — which is exactly why the application should pick them.
+
+**And three defects the review found in the first implementation:**
+
+- **`[]net.IP` was rejected while `net.IP` worked.** The nested-list guard ran before
+  per-element dispatch, and `net.IP` is a `[]byte` that parses itself — so a list of
+  trusted proxies, the most likely list-of-self-parsing-type in a web framework, could
+  not load, while a single one could. The docs claimed both worked.
+- **A `required` list accepted a value with no entries.** `ORIGINS=,,` is not an empty
+  value, so the check passed and the allowlist loaded empty, denying every origin at
+  runtime instead of failing at startup.
+- **`url.Parse` accepts values that are silently useless.** `APP_BASE_URL=localhost:8080`
+  — a plausible edit of the shipped default — parses as an *opaque* URL whose scheme is
+  `localhost`, and `JoinPath` discards whatever is appended to one. `linkr` handed out
+  short links reading `localhost:8080` with the code dropped entirely, with no error at
+  startup and none at request time. Set-but-empty did the same, because a `default` tag
+  only applies when the variable is absent.
+
+The last one was found by mutating the dogfood application, not the framework: `linkr`'s
+`short_url` had no assertion anywhere, so replacing `JoinPath` with the string
+concatenation the code comment explicitly argues against changed no test outcome.
+Every `default` tag in its configuration was equally unverified, because every test
+built `Config` as a struct literal and the config probe used a mirror type. It now loads
+the real `Config` through the framework.
 
 ### 10. `Context` has only `JSON` and `NoContent`
 

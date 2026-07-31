@@ -66,8 +66,10 @@ structured JSON errors, an owned server lifecycle — does not currently hold.
       form binding through `Values`
 - [ ] response helpers beyond `JSON` and `NoContent`: redirect, text, HTML,
       file, and server-sent events
-- [ ] typed config support for lists and `encoding.TextUnmarshaler`
-      (today: scalars and `time.Duration` only)
+- [x] typed config support for lists and `encoding.TextUnmarshaler`, plus `url.URL`
+      (which implements `BinaryUnmarshaler`, so the general mechanism misses it)
+- [ ] typed config support for maps — deliberately deferred: an environment encoding
+      for one needs two arbitrary separators
 
 The current validation design intentionally uses an explicit `Validate() error` contract. More ergonomic validation helpers may be added later without making reflection a requirement for the core.
 

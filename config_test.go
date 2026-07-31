@@ -97,16 +97,18 @@ func TestLoadConfigSupportsScalarTypes(t *testing.T) {
 
 func TestLoadConfigReportsAllParsingErrors(t *testing.T) {
 	type Config struct {
-		Bool     bool          `env:"BOOL"`
-		Int      int           `env:"INT"`
-		Uint     uint          `env:"UINT"`
-		Float    float64       `env:"FLOAT"`
-		Duration time.Duration `env:"DURATION"`
-		Slice    []string      `env:"SLICE"`
+		Bool     bool              `env:"BOOL"`
+		Int      int               `env:"INT"`
+		Uint     uint              `env:"UINT"`
+		Float    float64           `env:"FLOAT"`
+		Duration time.Duration     `env:"DURATION"`
+		Numbers  []int             `env:"NUMBERS"`
+		Mapping  map[string]string `env:"MAPPING"`
 	}
 	values := map[string]string{
 		"BOOL": "nope", "INT": "nope", "UINT": "-1",
-		"FLOAT": "nope", "DURATION": "soon", "SLICE": "a,b",
+		"FLOAT": "nope", "DURATION": "soon",
+		"NUMBERS": "1,two,3", "MAPPING": "a=b",
 	}
 	_, err := LoadConfigFromEnv[Config](func(key string) (string, bool) {
 		value, ok := values[key]
@@ -115,10 +117,15 @@ func TestLoadConfigReportsAllParsingErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected parsing errors")
 	}
-	for _, expected := range []string{"Bool", "Int", "Uint", "Float", "Duration", "Slice"} {
+	for _, expected := range []string{"Bool", "Int", "Uint", "Float", "Duration", "Mapping"} {
 		if !strings.Contains(err.Error(), expected) {
 			t.Fatalf("error does not contain %s: %v", expected, err)
 		}
+	}
+	// A bad list entry has to say which one, or the operator is left bisecting a
+	// comma-separated value by hand.
+	if !strings.Contains(err.Error(), `Numbers (NUMBERS): element 2: invalid integer "two"`) {
+		t.Fatalf("error does not locate the bad list element: %v", err)
 	}
 }
 
