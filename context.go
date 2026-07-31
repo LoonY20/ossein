@@ -30,6 +30,10 @@ type Context struct {
 	body     []byte
 	bodyErr  error
 	bodyRead bool
+
+	// query caches the parsed query string, or the failure to parse it.
+	query    *Values
+	queryErr error
 }
 
 // NewContext creates an Ossein request context around standard library HTTP types.
@@ -191,8 +195,10 @@ func (c *Context) checkJSONContentType() error {
 		return nil
 	}
 
+	// A malformed parameter still yields a usable media type, and net/http accepts
+	// such requests, so only the type itself decides. This matches BindForm.
 	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
+	if mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json") {
 		return NewHTTPError(
 			http.StatusUnsupportedMediaType,
 			"unsupported_media_type",

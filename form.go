@@ -1,12 +1,10 @@
 package ossein
 
 import (
-	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
@@ -17,9 +15,8 @@ const maxFormFields = 1000
 
 // FormBindable is implemented by request types that read themselves from a form.
 //
-// Binding is an explicit method rather than struct tags, so the request path
-// stays free of reflection and the mapping is ordinary Go that a reader can
-// follow:
+// Binding is an explicit method rather than struct tags, so the request path stays
+// free of reflection and the mapping is ordinary Go that a reader can follow:
 //
 //	func (r *ReplayRequest) BindForm(form *ossein.Form) error {
 //		r.Event = form.Required("event")
@@ -30,121 +27,34 @@ type FormBindable interface {
 	BindForm(*Form) error
 }
 
-// Form provides typed access to submitted form values and files.
+// Form is the submitted values of a form body plus any uploaded files.
 //
-// Accessors record a field-level error instead of returning one, so a bind
-// method reads as a list of assignments. Values that are absent yield the zero
-// value; values that are present but malformed are reported. Call Err, or let
-// Context.BindForm do it, to collect the result.
-//
-// Required and the typed accessors trim surrounding whitespace, since it is never
-// meaningful for a number, a boolean, or a presence check. String returns the
-// value exactly as submitted.
-//
-// A Form reads only the request body. Query-string parameters are deliberately
+// It embeds Values, so the typed accessors are the same ones a query string uses.
+// A Form reads only the request body: query-string parameters are deliberately
 // excluded, so a field can never be satisfied from the URL.
 type Form struct {
-	values url.Values
-	files  map[string][]*multipart.FileHeader
-	errs   *ValidationError
+	Values
+
+	files map[string][]*multipart.FileHeader
 }
 
-// Values returns the submitted values, for cases the accessors do not cover.
-func (f *Form) Values() url.Values {
-	return f.values
-}
-
-// Has reports whether a field was submitted at all, as a value or as a file,
-// which distinguishes an absent field from one submitted empty.
+// Has reports whether a field was submitted at all, as a value or as a file.
 func (f *Form) Has(field string) bool {
-	if _, ok := f.values[field]; ok {
+	if f.Values.Has(field) {
 		return true
 	}
 	_, ok := f.files[field]
 	return ok
 }
 
-// String returns a field value, or "" when it is absent.
-func (f *Form) String(field string) string {
-	return f.values.Get(field)
-}
-
-// Strings returns every value submitted for a repeated field.
-func (f *Form) Strings(field string) []string {
-	return f.values[field]
-}
-
-// Required returns a trimmed field value, recording an error when it is absent
-// or blank.
+// Required returns a trimmed field value, recording an error when it is absent or
+// blank. A field submitted as a file counts as present, so it is not reported
+// missing; use RequiredFile to read the upload itself.
 func (f *Form) Required(field string) string {
-	value := strings.TrimSpace(f.values.Get(field))
-	if value == "" {
-		f.AddError(field, "is required")
+	if _, uploaded := f.files[field]; uploaded {
+		return strings.TrimSpace(f.Values.String(field))
 	}
-	return value
-}
-
-// Int returns a field as an int. An absent field yields zero; a malformed one is
-// reported.
-func (f *Form) Int(field string) int {
-	return int(f.parseInt(field, strconv.IntSize))
-}
-
-// Int64 returns a field as an int64.
-func (f *Form) Int64(field string) int64 {
-	return f.parseInt(field, 64)
-}
-
-func (f *Form) parseInt(field string, bits int) int64 {
-	raw := strings.TrimSpace(f.values.Get(field))
-	if raw == "" {
-		return 0
-	}
-	parsed, err := strconv.ParseInt(raw, 10, bits)
-	if err != nil {
-		f.AddError(field, "must be a whole number")
-		return 0
-	}
-	return parsed
-}
-
-// Float64 returns a field as a float64.
-//
-// NaN and infinities are rejected: they parse successfully but make every
-// comparison in an application's rules false, so a range check would silently
-// pass, and encoding the value as JSON afterwards fails.
-func (f *Form) Float64(field string) float64 {
-	raw := strings.TrimSpace(f.values.Get(field))
-	if raw == "" {
-		return 0
-	}
-	parsed, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
-		f.AddError(field, "must be a number")
-		return 0
-	}
-	return parsed
-}
-
-// Bool returns a field as a bool, accepting the forms strconv.ParseBool does plus
-// the "on" and "off" that HTML checkboxes and their clients use.
-func (f *Form) Bool(field string) bool {
-	raw := strings.TrimSpace(f.values.Get(field))
-	if raw == "" {
-		return false
-	}
-	switch {
-	case strings.EqualFold(raw, "on"):
-		return true
-	case strings.EqualFold(raw, "off"):
-		return false
-	}
-	parsed, err := strconv.ParseBool(raw)
-	if err != nil {
-		f.AddError(field, "must be true or false")
-		return false
-	}
-	return parsed
+	return f.Values.Required(field)
 }
 
 // File returns the first uploaded file for a field, or nil when it is absent.
@@ -175,20 +85,6 @@ func (f *Form) Files(field string) []*multipart.FileHeader {
 	return f.files[field]
 }
 
-// AddError records an application rule failure against a field, so a bind method
-// can add checks alongside the accessors.
-func (f *Form) AddError(field, message string) {
-	if f.errs == nil {
-		f.errs = NewValidationError()
-	}
-	f.errs.Add(field, message)
-}
-
-// Err returns the recorded field errors, or nil when there are none.
-func (f *Form) Err() error {
-	return f.errs.OrNil()
-}
-
 // BindForm parses a form request into target.
 //
 // The Content-Type must be application/x-www-form-urlencoded or
@@ -200,17 +96,17 @@ func (f *Form) Err() error {
 // BindJSON.
 //
 // Field errors recorded by the accessors are reported before Validate runs, so a
-// malformed value is not also reported as a broken application rule, and they
-// take precedence over an error the bind method itself returned, since they are
-// what the client can act on. When the values bind cleanly and target implements
+// malformed value is not also reported as a broken application rule, and they take
+// precedence over an error the bind method itself returned, since they are what the
+// client can act on. When the values bind cleanly and target implements
 // Validatable, validation runs automatically.
 //
 // Multipart parts are held in memory rather than spilled to temporary files, so
 // there is nothing to clean up: the in-memory limit is the body limit, and the
 // whole body was already capped at it, so no part can exceed what remains. Note
-// that this holds two copies of the body, so peak use is about twice the limit
-// for a multipart request. The body limit does not bound the size of the parsed
-// form itself, which is why the field count is capped separately.
+// that this holds two copies of the body, so peak use is about twice the limit for
+// a multipart request. The body limit does not bound the size of the parsed form
+// itself, which is why the field count is capped separately.
 func (c *Context) BindForm(target FormBindable) error {
 	if target == nil {
 		return BadRequest("invalid_request", "Request target cannot be nil")
@@ -221,19 +117,19 @@ func (c *Context) BindForm(target FormBindable) error {
 		return err
 	}
 
-	form := &Form{values: values, files: files}
+	form := &Form{Values: Values{values: values}, files: files}
+	return finishBinding(target.BindForm(form), &form.Values, target)
+}
 
-	bindErr := target.BindForm(form)
-	// Field errors take precedence over an error the bind method returned: they
-	// are what the client can act on, and losing them would turn a 422 field
-	// report into an opaque failure.
-	if fieldErr := form.Err(); fieldErr != nil {
+// finishBinding applies the shared error precedence: recorded field errors first,
+// then an error the bind method returned, then validation.
+func finishBinding(bindErr error, values *Values, target any) error {
+	if fieldErr := values.Err(); fieldErr != nil {
 		return fieldErr
 	}
 	if bindErr != nil {
 		return bindErr
 	}
-
 	if validatable, ok := target.(Validatable); ok {
 		return validatable.Validate()
 	}
@@ -256,10 +152,18 @@ func (c *Context) parseForm() (url.Values, map[string][]*multipart.FileHeader, e
 	}
 
 	if multipartRequest {
-		// The in-memory limit is the body limit, and Body already capped the
-		// whole body at it, so no single part can exceed what remains and
-		// nothing is spilled to a temporary file. Removing the pre-read above
-		// would break that guarantee.
+		// ParseMultipartForm calls ParseForm when Form is unset, which parses the
+		// query string and would report a bad URL as a malformed body. Filling
+		// Form first keeps this bind body-only, matching the urlencoded branch.
+		if c.Request.Form == nil {
+			query, _ := url.ParseQuery(c.Request.URL.RawQuery)
+			c.Request.Form = query
+		}
+
+		// The in-memory limit is the body limit, and Body already capped the whole
+		// body at it, so no single part can exceed what remains and nothing is
+		// spilled to a temporary file. Removing the pre-read above would break
+		// that guarantee.
 		if err := c.Request.ParseMultipartForm(c.bindLimit()); err != nil {
 			return nil, nil, BadRequest("invalid_form", "Request body is not a valid multipart form").
 				WithCause(err)
@@ -267,9 +171,9 @@ func (c *Context) parseForm() (url.Values, map[string][]*multipart.FileHeader, e
 		return c.Request.PostForm, c.Request.MultipartForm.File, nil
 	}
 
-	// The body is parsed directly rather than through Request.ParseForm, which
-	// only reads bodies for POST, PUT, and PATCH and applies its own 10 MB cap
-	// that would shadow a larger WithMaxBindBytes.
+	// The body is parsed directly rather than through Request.ParseForm, which only
+	// reads bodies for POST, PUT, and PATCH and applies its own 10 MB cap that
+	// would shadow a larger WithMaxBindBytes.
 	values, err := url.ParseQuery(string(raw))
 	if err != nil {
 		return nil, nil, BadRequest("invalid_form", "Request body is not a valid form").
@@ -297,10 +201,10 @@ func (c *Context) checkFormContentType() (bool, error) {
 		return false, unsupportedFormMediaType(nil)
 	}
 
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return false, unsupportedFormMediaType(err)
-	}
+	// A malformed parameter still yields a usable media type, and net/http accepts
+	// such requests, so only the type itself decides. An unreadable header yields
+	// an empty type and falls through to the default below.
+	mediaType, _, _ := mime.ParseMediaType(contentType)
 
 	switch mediaType {
 	case "application/x-www-form-urlencoded":

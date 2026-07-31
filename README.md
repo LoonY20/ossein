@@ -56,8 +56,9 @@ Today Ossein intentionally stays small:
   and a configurable body size limit;
 - raw body access through `Context.Body` that composes with `BindJSON`, for
   signed payloads such as webhook HMACs;
-- form and multipart binding through an explicit `FormBindable` contract, with
-  typed accessors, file uploads, and no reflection on the request path;
+- form, multipart, and query-string binding through explicit `FormBindable` and
+  `QueryBindable` contracts, sharing one set of typed accessors, with file
+  uploads and no reflection on the request path;
 - response status and size tracking through a wrapped `http.ResponseWriter`;
 - validation through an explicit `Validate() error` contract;
 - field-level `ValidationError` responses;
@@ -523,10 +524,7 @@ type ReplayRequest struct {
 func (r *ReplayRequest) BindForm(form *ossein.Form) error {
     r.Event = form.Required("event")
     r.DryRun = form.Bool("dry_run")
-    r.Limit = form.Int("limit")
-    if !form.Has("limit") {
-        r.Limit = 10
-    }
+    r.Limit = form.IntOr("limit", 10)
     return nil
 }
 
@@ -541,10 +539,15 @@ func replay(c *ossein.Context) error {
 
 Accessors record field-level errors instead of returning them, so a bind method
 reads as a list of assignments. `Required`, `Int`, `Int64`, `Float64`, and `Bool`
-report a malformed value against its field; `Has` distinguishes an absent field
-from an empty one; `AddError` adds an application rule. Those errors are reported
-before `Validate` runs, so a malformed value is not also blamed for breaking a
-rule that never saw it.
+report a malformed value against its field; the `Or` variants take a default for a
+field that is absent or blank, which is what an HTML form submits for an untouched
+input; `Has` distinguishes an absent field from one that was never sent at all;
+`AddError` adds an application rule. Those errors are reported before `Validate`
+runs, so a malformed value is not also blamed for breaking a rule that never saw
+it.
+
+`ossein.NewValues` wraps a `url.Values`, so a bind method can be tested directly
+without building a request.
 
 Uploads come through `File`, `RequiredFile`, and `Files`, which return
 `*multipart.FileHeader`. Parts are held in memory under the same body limit, so
@@ -569,6 +572,52 @@ func (r *BulkRequest) BindForm(form *ossein.Form) error {
 Unlike `BindJSON`, `BindForm` rejects an absent `Content-Type`: decoding JSON
 validates the format as it goes, while a query-string parse almost never fails,
 so an unlabelled body would bind as silently empty fields.
+
+### Query strings
+
+Query binding uses the same accessors, so there is one vocabulary to learn.
+`Values` holds them and `Form` embeds it:
+
+```go
+type ListQuery struct {
+    Page    int
+    PerPage int
+    Search  string
+}
+
+func (q *ListQuery) BindQuery(values *ossein.Values) error {
+    q.Page = values.IntOr("page", 1)
+    q.PerPage = values.IntOr("per_page", 20)
+    q.Search = values.String("q")
+    return nil
+}
+
+func (q *ListQuery) Validate() error {
+    errs := ossein.NewValidationError()
+    if q.PerPage < 1 || q.PerPage > 100 {
+        errs.Add("per_page", "must be between 1 and 100")
+    }
+    return errs.OrNil()
+}
+```
+
+For a handler that wants a parameter or two and not a request type, read them
+directly and return the recorded errors:
+
+```go
+query, err := c.Query()
+if err != nil {
+    return err
+}
+page := query.Int("page")
+if err := query.Err(); err != nil {
+    return err
+}
+```
+
+Only the query string is read, so a form body never satisfies a query field, and
+a malformed query string is reported as a `400` rather than binding as silently
+missing fields.
 
 ## Standard Go escape hatch
 

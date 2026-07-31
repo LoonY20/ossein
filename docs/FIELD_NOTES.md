@@ -282,7 +282,7 @@ exact failure the media-type strictness above was justified by — while
 `WithMaxBindBytes` above 10 MB was silently shadowed by the standard library's own
 cap and surfaced as a `400`. Parsing the already-capped bytes directly fixed both.
 
-### 6. No query-string binding or helpers
+### 6. No query-string binding or helpers — RESOLVED
 
 Every list endpoint hand-parses and range-checks `page`, `per_page`, and filters
 via `c.Request.URL.Query()` plus `strconv`. The pagination block in linkr is
@@ -290,6 +290,44 @@ via `c.Request.URL.Query()` plus `strconv`. The pagination block in linkr is
 
 **Proposal.** `Context.Query`/`QueryInt`/`QueryBool` with defaults, and a
 `BindQuery(target)` that runs `Validate()`.
+
+**Resolution.** The proposed `QueryInt`/`QueryBool` accessors on `Context` were
+dropped in favour of reusing the accessor set form binding had just gained. The
+two sources need identical operations, so `Values` now holds them and `Form`
+embeds it: `BindQuery` and `BindForm` are two entry points onto one vocabulary
+rather than two parallel APIs to learn. `Context.Query` returns the parsed values
+for a handler that wants a parameter or two without a request type.
+
+Doing item 5 first paid off here — this item added one small type and two methods
+instead of a second accessor family. It also cost a rename: `Form.Values()` became
+`Form.All()`, since a `Values` type with a `Values()` method reads badly. Free to
+do before a release, which is the argument for fixing names early.
+
+A malformed query string is reported as a `400` rather than binding as silently
+missing fields, matching the reasoning behind the form media-type rule.
+`Request.URL.Query()` drops unparseable pairs without saying so, so the raw query
+is parsed directly.
+
+linkr's pagination block went from 25 lines of `strconv` and range checks to a
+three-line bind method, and `page=0` now answers `422` with a field-level error
+instead of a hand-rolled `400`, matching the shape its JSON endpoints already
+used.
+
+Review caught that the idiom this item shipped was itself broken. `Has` reports
+presence, and an HTML form submits an untouched input as present-but-empty, so
+`?page=` made `Has` true while `Int` returned zero: the default was skipped and
+the zero value then failed validation. Rather than rewrite the documentation
+around the trap, the `Or` accessors remove it — `values.IntOr("page", 1)` is one
+call and cannot get this wrong. Review also found that query strings had no field
+count cap while bodies did, so the same payload was a `413` as a body and a 26 MB
+map as a URL; both now share the limit.
+
+Two design gaps worth recording. `Values` had no exported constructor, so a bind
+method — the unit this whole design exists to make explicit and ordinary — could
+only be exercised through a full HTTP request; `NewValues` fixes that. And
+`Form.Required` could not see files, so a field submitted as an upload was reported
+missing while `Has` and `File` both said it was there: embedding gives promotion,
+not virtual dispatch, so the override had to be written out.
 
 ### 7. The standard middleware set is missing
 

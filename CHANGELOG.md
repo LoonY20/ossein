@@ -65,6 +65,20 @@ Ossein uses semantic versioning for published releases.
   the same body limit, so nothing is spilled to a temporary file, and the number
   of urlencoded fields is capped because the body limit does not bound the size of
   the parsed form
+- `Context.BindQuery` and `Context.Query` for the query string, on the same typed
+  accessors as forms: `Values` holds the accessor set and `Form` embeds it, so
+  learning it once covers both. `BindQuery` takes a `QueryBindable` and applies the
+  same error precedence and automatic `Validate()`; `Query` returns the parsed
+  values for a handler that wants one or two parameters without a request type. A
+  malformed query string is reported as a `400` instead of binding as silently
+  missing fields, and only the query string is read, so a form body never satisfies
+  a query field. The field count is capped as it is for bodies
+- `StringOr`, `IntOr`, `Int64Or`, `Float64Or`, and `BoolOr` take a default for a
+  field that is absent or blank. Pairing `Has` with a typed accessor gets this
+  wrong: an HTML form submits an untouched input as present-but-empty, so the
+  default would be skipped and the zero value then reported as invalid
+- `ossein.NewValues` wraps a `url.Values`, so a bind method can be tested directly
+  without building a request
 
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error
@@ -82,6 +96,10 @@ Ossein uses semantic versioning for published releases.
   `Use`, route registration, and the new fallback setters. The request path reads
   the handler, so a late replacement was both a data race and a source of
   within-request disagreement between middleware and handlers
+- a malformed `Content-Type` *parameter* no longer decides the media type for
+  `BindJSON` or `BindForm`: `application/json; charset=` and its form equivalent
+  are accepted, as `net/http` accepts them, rather than answering `415` with a
+  message naming the very type that was sent. Only the media type itself decides
 
 ## [0.2.0] - 2026-07-30
 
