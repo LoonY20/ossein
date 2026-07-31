@@ -90,6 +90,15 @@ Ossein uses semantic versioning for published releases.
   cover error responses too, without replacing a header already present — including
   one deliberately set empty. Register `AccessLog` outside `Recover`, since a
   middleware only observes a status written below it
+- `middleware.Timeout` bounds how long a request may take and answers `504` through
+  the application's error handler. Unlike `http.TimeoutHandler`, it preserves the
+  Ossein response writer, so `Written()` tracking, the committed-response guard, the
+  access log's status, `http.ResponseController`, and streaming all keep working. The
+  request context is cancelled at the deadline; a handler that ignores it keeps
+  running but its writes are discarded, and rejection is keyed on the deadline rather
+  than on scheduling, so it is deterministic. A panic on the handler's goroutine is
+  forwarded to the request goroutine for `Recover`, and one arriving after the
+  deadline is logged rather than lost
 
 - field notes from building two applications on Ossein, and the roadmap items
   they produced: `http.Server` configuration, `404`/`405` rendering, an error

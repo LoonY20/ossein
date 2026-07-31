@@ -66,8 +66,8 @@ Today Ossein intentionally stays small:
   through `SetNotFoundHandler` and `SetMethodNotAllowedHandler`;
 - `WriteError` for rendering the application's error contract from plain
   `net/http` middleware, plus the exported `ErrorEnvelope`;
-- a `middleware` package with panic recovery, access logging, and security
-  headers;
+- a `middleware` package with panic recovery, access logging, security headers,
+  and a request timeout that preserves response tracking;
 - typed environment configuration with defaults and required values;
 - optional dependency-free `.env` loading with exported-variable precedence;
 - standard-library `log/slog` integration;
@@ -418,6 +418,26 @@ middleware.SecurityHeaders(middleware.SecurityHeaderValues(map[string]string{
 `Content-Security-Policy` and `Strict-Transport-Security` are deliberately not
 defaults: a useful CSP depends on what the application serves, and HSTS sent from
 a host that is not fully HTTPS causes lasting problems.
+
+`Timeout` bounds how long a request may take and answers `504` through the error
+handler. Prefer it over `http.TimeoutHandler`, which substitutes a buffer for the
+response writer: inside it a handler can no longer reach `*ossein.ResponseWriter`,
+so the committed-response guard, the access log's status, and flushing all stop
+working, and the timeout body is plain text outside the error contract.
+
+```go
+app.Group("/api", func(api *ossein.Router) {
+    api.Use(middleware.Timeout(10 * time.Second))
+    // ...
+})
+```
+
+The request context is cancelled at the deadline, so a handler that honours
+cancellation returns on its own; one that does not keeps running in the background
+with its writes discarded. A response already committed is left alone, so a
+streaming handler that overruns keeps what the client received. Scope it to a group
+rather than applying it to long-lived streaming routes, and register it inside
+`Recover`, so a panic it forwards from the handler's goroutine is still caught.
 
 ## Route groups
 

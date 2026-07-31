@@ -416,7 +416,7 @@ on `ResponseController`, all of which must keep `ResponseWriter` tracking intact
 
 ## P3 — Sharp edges and correctness risks
 
-### 11. `http.TimeoutHandler` silently defeats response tracking
+### 11. `http.TimeoutHandler` silently defeats response tracking — RESOLVED
 
 Because the framework ships no timeout middleware, the natural move is
 `http.TimeoutHandler`. Inside it, the handler no longer sees an
@@ -434,6 +434,29 @@ most obvious standard-library tool for the job.
 **Proposal.** Ship a timeout middleware that preserves the wrapper and renders
 through the `ErrorHandler` (504 in the standard envelope), and document the
 `http.TimeoutHandler` interaction explicitly.
+
+**Resolution.** `middleware.Timeout` exposes `Unwrap`, so `ResponseWriterFrom`,
+`http.ResponseController`, the committed-response guard, and the access log's status
+all reach through it, and a streaming handler can still flush — the things the
+standard library's version breaks by substituting a buffer. The 504 renders through
+the application's error handler.
+
+Two things it has to get right, and neither was obvious. The handler runs on another
+goroutine, so a panic there must be forwarded to the request goroutine or it takes
+the process down instead of being recovered; a panic arriving after the deadline is
+logged rather than swallowed, which is what the standard library does with it.
+
+And rejecting late writes cannot be keyed on the middleware observing the deadline.
+The first version selected on "handler finished" against "deadline passed", and Go
+picks randomly when both are ready — so a handler that deliberately ignored
+cancellation won the race often enough that a concurrency test caught a `200` where
+a `504` was required. Rejection is now keyed on the context deadline itself, which
+makes it deterministic regardless of scheduling. The guard around the write is what
+keeps the timeout response and a late handler write from interleaving at all.
+
+hooksink's probe was inverted: it now asserts that `http.TimeoutHandler` still hides
+the writer, which is the standing reason to prefer the framework's, and that the
+framework's keeps tracking, flushing, and the error contract.
 
 ### 12. `cache.Store` has no atomic claim operation
 
