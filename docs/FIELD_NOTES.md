@@ -382,11 +382,28 @@ reaches for and is what silently defeats response tracking.
 CORS closed the item. The short-circuit is not a convenience: a preflight matches no
 route, so without it the router answers `405`, and group middleware cannot help
 because it does not run for a request matching no route in the group — both halves of
-the original complaint. Two configurations panic at setup rather than being served:
-a wildcard origin with credentials, which the specification forbids and which would
-let any site make authenticated requests with the user's cookies, and a configuration
-that can never allow anything. `AllowOriginFunc` covers subdomains and dynamic
-allowlists without inventing a pattern syntax.
+the original complaint.
+
+The security review of it produced the sharpest single correction in this document.
+My first version panicked on a wildcard origin combined with credentials, and left
+`AllowOriginFunc` unchecked — which had the guard exactly backwards. A wildcard with
+credentials is **inert**, because browsers refuse the pair outright; a function
+reflecting every origin with credentials **works**, and hands any site authenticated
+read access. So the guard blocked the harmless variant and permitted the dangerous
+one, while the documentation recommended `AllowOriginFunc` a few lines away. Setup now
+probes the function with a reserved `.invalid` origin, which no real request can carry,
+and refuses a function that accepts it.
+
+Two smaller ones worth recording. Configured methods were passed through unchanged, so
+a lower-case `AllowedMethods` produced a preflight that looked approved and was then
+rejected by the browser, which compares the list byte for byte — a failure with nothing
+in the response to explain it. And a sub-second `MaxAge` truncated to `0`, which tells
+a browser not to cache at all: the opposite of what was asked for.
+
+For the third time in this package, a set of tests read the live header map instead of
+the snapshot taken when the response was committed. Moving *every* CORS header to after
+`WriteHeader` — which would send a bare `204` and break every cross-origin request —
+passed the whole suite.
 
 Only the body-limit middleware remains from the original list, and it is now the
 weakest item on it: `WithMaxBindBytes` already bounds every binding path and

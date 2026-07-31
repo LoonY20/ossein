@@ -460,20 +460,30 @@ app.Use(middleware.CORS(middleware.CORSOptions{
 }))
 ```
 
-Register it with `App.Use` rather than on a group. A preflight is an `OPTIONS`
-request that matches no route, so it must be answered before routing — and group
-middleware does not run for a request that matches no route in the group.
+Register it with `App.Use` rather than on a group, and inside `AccessLog`. A
+preflight is an `OPTIONS` request that matches no route, so it must be answered
+before routing — group middleware does not run for a request that matches no route in
+the group, and a log registered below CORS never sees a preflight at all.
 
 A request with no `Origin` passes through untouched. An origin that is not allowed
 also passes through, without the headers that let a browser read the response, since
 enforcement is the browser's job. `Vary` is appended rather than replaced, so a value
-set elsewhere survives. `AllowOriginFunc` covers subdomains and allowlists held
-elsewhere.
+set elsewhere survives.
 
-Two configurations panic at setup rather than being served unsafely: a wildcard
-origin together with `AllowCredentials`, which the specification forbids and which
-would let any site make authenticated requests with the user's cookies, and a
-configuration that can never allow anything.
+**CORS is not CSRF protection.** A simple cross-origin request needs no preflight, so
+it reaches the handler and runs whatever the browser then does with the response. CORS
+governs who may *read* a response, not who may cause one.
+
+Setup panics for configurations that cannot be served safely: one that can never
+allow anything, and `AllowCredentials` combined with a wildcard origin, the `null`
+origin, or an `AllowOriginFunc` that approves everything. That last check matters most
+and is the least obvious: a wildcard with credentials is inert, because browsers
+refuse the pair outright, while a function reflecting every origin *works* — so it,
+not the wildcard, is the configuration that would hand any site authenticated read
+access.
+
+`AllowOriginFunc` covers subdomains and allowlists held elsewhere. Match on the whole
+origin rather than a suffix: `https://evil-app.test` ends with `app.test`.
 
 ## Route groups
 

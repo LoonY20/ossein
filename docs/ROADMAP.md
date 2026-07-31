@@ -141,7 +141,10 @@ Goal: make Ossein useful for real backend services.
       renders through the error handler (`middleware.Timeout`) —
       `http.TimeoutHandler` replaces the writer, silently disabling `Written()`
       and the already-committed guard
-- [ ] request body limit middleware
+- [ ] request body limit middleware (weak: `WithMaxBindBytes` already bounds every
+      binding path and `Context.Body`)
+- [ ] private network access preflight headers, which Chrome requires for a public
+      page calling a private-network service
 - [ ] detached background context preserving the request ID and request-scoped
       logger, for deferred work and future queue workers
 - [ ] driver-neutral SQL error classification: unique violation, deadlock,
