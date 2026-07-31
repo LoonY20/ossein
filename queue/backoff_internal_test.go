@@ -48,7 +48,7 @@ func TestProcessReportsAJobWithNoHandler(t *testing.T) {
 	failures := make(chan error, 1)
 	worker := NewMemory(
 		WithLogger(discardTestLogger()),
-		OnFailure(func(_ context.Context, _ Job, err error) {
+		WithFailureHandler(func(_ context.Context, _ Job, err error) {
 			failures <- err
 		}),
 	)

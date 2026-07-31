@@ -450,6 +450,44 @@ provider redelivers) and wrong for work that must not be lost — which is what 
 `Enqueuer` interface is for. A durable driver is a separate step; the contract
 that lets it drop in without touching call sites is here now.
 
+**And four more defects the review found in my implementation**, which is the more
+useful record:
+
+- **A second unsynchronized map.** I fixed the channel race and then read the
+  handler table from `Enqueue` with no lock at all, while `Handle` was still writing
+  it. Both are legal before `Start`. An unsynchronized map read against a write is a
+  `fatal error`, not a panic — `middleware.Recover` cannot catch it and the process
+  dies. My struct comment asserted the table was "written before Start and read by
+  workers afterwards", which is exactly the belief that let me miss the third reader.
+- **`Stop` reported success while dropping work.** A queue stopped without having
+  started — an earlier start hook failed, so the queue's never ran — closed its
+  "finished" signal eagerly and returned `nil` with jobs still in the buffer. The
+  same eager close then made every later `Stop` return instantly, so a subsequent
+  shutdown could report a clean drain with a job mid-flight.
+- **A job could never observe shutdown.** Every handler context came from
+  `context.Background()`, so a job had no way to know the drain had given up, and
+  workers kept starting new jobs after `Stop` returned its error — against
+  dependencies the stop hooks were already closing. The fix distinguishes the two
+  cases that were conflated: a graceful drain leaves the context alone (waiting for
+  the job is the whole point), an expired one cancels it.
+- **Abandoned was reported as dead.** A job that happened to be in its backoff when
+  shutdown began was handed to the failure handler as permanently failed, and my own
+  docs said that hook fires only on exhausted attempts. In production that means a
+  dead-letter entry for live work on every deploy.
+
+Two of the tests I cited as evidence in this very entry could not fail. The
+"found by a test written for exactly this" claim above was false: the stress test
+that shipped never hit the window, and the fix it protects could be deleted with the
+suite still green — the reviewer had to scale it 300× to reproduce. It is now driven
+deterministically through an injection point, and both ways of removing the lock die
+with the exact `send on closed channel` panic. The abandonment test measured only
+that shutdown was fast, which skipping the delay and running the remaining attempts
+back-to-back also satisfies; it now counts invocations.
+
+Twenty-one mutations, one per guard and ordering decision in the package, are now
+each confirmed to fail at least one test. That is a materially different claim from
+the 100% statement coverage this package had while all of the above was true.
+
 ### 9. Typed config handles only scalars
 
 ```
@@ -590,6 +628,19 @@ framework-run workers will face the same problem.
 **Proposal.** `ossein.Detach(ctx) context.Context` returning a non-cancellable
 context that preserves the request ID and logger, and have any future queue
 carry it automatically.
+
+**Correction (finding 8's review).** The evidence above was worthless: the probe
+compared the request ID against `RequestIDFromContext(context.Background())`, which
+is empty by construction. It never attempted to inherit anything and could not have
+failed. Rewritten, it shows `context.WithoutCancel(c.Context())` already carries
+both the request ID and the logger — they are context values, and only the
+cancellation is dropped.
+
+So the gap is smaller than this note claimed: the mechanism exists in the standard
+library, and `ossein.Detach` would be a thin alias for it. What is genuinely missing
+is the other direction — a job cannot be correlated with the request that enqueued
+it, because `Job` carries no place to put the ID and the worker builds its context
+from scratch. That is the part worth designing.
 
 ### 15. No driver-neutral SQL error classification
 

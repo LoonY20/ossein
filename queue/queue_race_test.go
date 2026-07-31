@@ -3,7 +3,9 @@ package queue_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,20 +63,24 @@ func TestConcurrentEnqueueAndStopDoesNotPanic(t *testing.T) {
 // which for the default backoff reaches thirty seconds.
 func TestStopAbandonsPendingRetries(t *testing.T) {
 	failures := make(chan queue.Job, 1)
+	reported := make(chan error, 1)
 	worker := queue.NewMemory(
 		queue.WithLogger(discardLogger()),
 		queue.WithWorkers(1),
 		queue.WithMaxAttempts(5),
 		// Long enough that a drain waiting for it would blow the deadline below.
 		queue.WithBackoff(func(int) time.Duration { return 30 * time.Second }),
-		queue.OnFailure(func(_ context.Context, job queue.Job, _ error) {
+		queue.WithFailureHandler(func(_ context.Context, job queue.Job, err error) {
+			reported <- err
 			failures <- job
 		}),
 	)
 
 	failed := make(chan struct{})
 	var once sync.Once
+	var attempts atomic.Int64
 	worker.Handle("flaky", func(context.Context, queue.Job) error {
+		attempts.Add(1)
 		once.Do(func() { close(failed) })
 		return errors.New("temporary failure")
 	})
@@ -106,6 +112,33 @@ func TestStopAbandonsPendingRetries(t *testing.T) {
 	case <-failures:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the abandoned job was not reported as failed")
+	}
+
+	// The report must say which kind of ending this was, and still carry the error
+	// that caused the retry, or a dead-letter sink cannot tell live work from dead.
+	err := <-reported
+	if !errors.Is(err, queue.ErrAbandoned) {
+		t.Fatalf("error = %v, want it to wrap ErrAbandoned", err)
+	}
+	if !strings.Contains(err.Error(), "temporary failure") {
+		t.Fatalf("error = %v, want the handler's own error preserved", err)
+	}
+
+	// The point is that the remaining attempts are abandoned, not merely that their
+	// delay is skipped: skipping the wait and then running attempts 2 through 5
+	// back-to-back would also be fast, and would also report a failure.
+	if ran := attempts.Load(); ran != 1 {
+		t.Fatalf("the handler ran %d times, want 1: the retries were not abandoned", ran)
+	}
+
+	// Abandoned is not failed. The job was still retryable, and a dead-letter table
+	// that cannot tell the difference records live work as dead on every deploy.
+	stats := worker.Stats()
+	if stats.Abandoned != 1 {
+		t.Fatalf("stats.Abandoned = %d, want 1", stats.Abandoned)
+	}
+	if stats.Failed != 0 {
+		t.Fatalf("stats.Failed = %d, want 0 for an abandoned job", stats.Failed)
 	}
 }
 

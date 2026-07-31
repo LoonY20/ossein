@@ -192,7 +192,7 @@ func TestFailureHandlerPanicDoesNotStopTheWorker(t *testing.T) {
 		queue.WithLogger(discardLogger()),
 		queue.WithWorkers(1),
 		queue.WithMaxAttempts(1),
-		queue.OnFailure(func(context.Context, queue.Job, error) {
+		queue.WithFailureHandler(func(context.Context, queue.Job, error) {
 			panic("the failure handler is broken")
 		}),
 	)

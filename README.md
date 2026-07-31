@@ -448,8 +448,53 @@ after which `WithFailureHandler` sees it — that is where a dead-letter table o
 alert goes. A job that panics becomes an error on the same path instead of taking
 its worker down. A job name with no registered handler is refused by `Enqueue`,
 where the caller can still return an error, rather than disappearing into a log
-line. `Stats` reports queue depth and processed, failed, and refused counts,
+line.
+
+The failure handler also sees a job whose retries were cut short because shutdown
+began, which is a different thing from a job that is dead. `ErrAbandoned` separates
+them, and filing the two together means a dead-letter entry for live work on every
+deploy:
+
+```go
+queue.WithFailureHandler(func(ctx context.Context, job queue.Job, err error) {
+    if errors.Is(err, queue.ErrAbandoned) {
+        // Still retryable; its source will resubmit it.
+        return
+    }
+    deadLetters.Record(ctx, job, err)
+})
+```
+
+`Stats` reports queue depth and processed, failed, abandoned, and refused counts,
 which makes a useful health endpoint.
+
+### Shutdown
+
+A job runs under a context that is *not* cancelled by a graceful drain — that is
+the point of draining: the shutdown waits for the job rather than interrupting it.
+It is cancelled when the drain runs out of time, which is the signal that finishing
+gracefully is no longer available:
+
+```go
+work.Handle("report.build", func(ctx context.Context, job queue.Job) error {
+    for _, chunk := range chunks {
+        if err := ctx.Err(); err != nil {
+            return err // shutdown gave up waiting; stop cleanly
+        }
+        ...
+    }
+})
+```
+
+`Stop` reports what shutdown could not finish, so a dropped job is never mistaken
+for a clean exit: an incomplete drain and accepted work that no worker ever ran are
+both errors. Since `Register` returns the queue's `Stop` as a lifecycle hook, that
+error surfaces from the application's own shutdown.
+
+Register the queue *after* whatever its jobs depend on. Stop hooks run in reverse,
+so the workers then finish before the database closes underneath them — for a drain
+that completes. If it times out, cancellation is all a job gets, which is why a job
+should honor the context it is given.
 
 In-process means in-memory: pending jobs do not survive a crash or a kill that
 outruns the shutdown timeout. That is the right trade-off for work that can be

@@ -160,7 +160,7 @@ func TestExhaustedAttemptsReportFailureOnce(t *testing.T) {
 	worker := started(t,
 		queue.WithMaxAttempts(2),
 		queue.WithBackoff(func(int) time.Duration { return time.Millisecond }),
-		queue.OnFailure(func(_ context.Context, job queue.Job, err error) {
+		queue.WithFailureHandler(func(_ context.Context, job queue.Job, err error) {
 			if job.Attempt != 2 {
 				t.Errorf("failed job attempt = %d, want the last one", job.Attempt)
 			}
@@ -240,7 +240,7 @@ func TestAPanicIsTreatedAsAFailure(t *testing.T) {
 	failures := make(chan error, 1)
 	worker := started(t,
 		queue.WithMaxAttempts(1),
-		queue.OnFailure(func(_ context.Context, _ queue.Job, err error) {
+		queue.WithFailureHandler(func(_ context.Context, _ queue.Job, err error) {
 			failures <- err
 		}),
 	)
@@ -500,7 +500,7 @@ func TestStatsReportProgress(t *testing.T) {
 	worker := started(t,
 		queue.WithWorkers(1),
 		queue.WithMaxAttempts(1),
-		queue.OnFailure(func(context.Context, queue.Job, error) {}),
+		queue.WithFailureHandler(func(context.Context, queue.Job, error) {}),
 	)
 
 	var group sync.WaitGroup
@@ -540,7 +540,7 @@ func TestJobLoggerCarriesTheJobName(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	worker := queue.NewMemory(queue.WithLogger(logger), queue.WithMaxAttempts(1),
-		queue.OnFailure(func(context.Context, queue.Job, error) {}))
+		queue.WithFailureHandler(func(context.Context, queue.Job, error) {}))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

@@ -47,6 +47,12 @@ var (
 	// Enqueue rather than discovered on a worker, so the mistake surfaces where it
 	// was made.
 	ErrNoHandler = errors.New("ossein queue: no handler registered for job")
+
+	// ErrAbandoned reports that a job's remaining retries were cut short because
+	// shutdown began. It reaches the failure handler wrapped around the last error,
+	// so errors.Is separates a job that is genuinely dead from one that was still
+	// retryable — the difference between a dead-letter record and a redelivery.
+	ErrAbandoned = errors.New("ossein queue: retries abandoned at shutdown")
 )
 
 // stackBufferBytes bounds the stack trace captured for a panicking handler.
@@ -63,8 +69,11 @@ type Job struct {
 	// Payload is the job's data, untouched by the queue.
 	Payload []byte
 
-	// Attempt is the 1-based try number, set by the worker. A handler can use it to
-	// decide when to give up on its own, or to make a retry idempotent.
+	// Attempt is the 1-based try number. A handler can use it to decide when to give
+	// up on its own, or to make a retry idempotent.
+	//
+	// The worker owns it: a value set before submission is overwritten, so a Job value
+	// can be resubmitted without carrying a spent retry budget with it.
 	Attempt int
 }
 
@@ -87,6 +96,9 @@ type Stats struct {
 	Processed int64
 	// Failed counts jobs that exhausted their attempts.
 	Failed int64
+	// Abandoned counts jobs whose remaining retries were cut short by shutdown.
+	// They are not counted as failed: they were still retryable.
+	Abandoned int64
 	// Refused counts jobs rejected because the queue was full.
 	Refused int64
 }
@@ -154,12 +166,16 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// OnFailure is called once per job that exhausts its attempts, with the last error.
-// It is where a dead-letter record belongs.
+// WithFailureHandler sets the callback for a job that will not be retried again,
+// with the last error. It is where a dead-letter record belongs.
+//
+// It is called both for a job that exhausted its attempts and for one whose retries
+// were cut short by shutdown; errors.Is(err, ErrAbandoned) separates the two, and
+// only the first is genuinely dead.
 //
 // It runs on the worker's goroutine, so it should be quick and must not panic; a
 // panic in it is recovered and logged.
-func OnFailure(handler func(context.Context, Job, error)) Option {
+func WithFailureHandler(handler func(context.Context, Job, error)) Option {
 	return func(o *options) {
 		if handler != nil {
 			o.onFailure = handler
@@ -168,13 +184,17 @@ func OnFailure(handler func(context.Context, Job, error)) Option {
 }
 
 // defaultBackoff doubles from 100ms and stops growing at thirty seconds.
+//
+// The shift count is clamped at both ends: a large attempt would shift the whole
+// value out and produce a zero delay — a retry storm rather than a backoff — and a
+// negative one would panic.
 func defaultBackoff(attempt int) time.Duration {
 	const (
 		base = 100 * time.Millisecond
 		most = 30 * time.Second
 	)
-	delay := base << min(attempt-1, 16)
-	if delay > most || delay <= 0 {
+	delay := base << min(max(attempt-1, 0), 16)
+	if delay > most {
 		return most
 	}
 	return delay
@@ -190,14 +210,18 @@ type Memory struct {
 	settings options
 	jobs     chan Job
 
-	// handlers is written only before Start and read by every worker afterwards, so
-	// registration is frozen rather than locked on the hot path.
-	handlers map[string]Handler
-	started  atomic.Bool
+	// handlersMu guards handlers. Registration is frozen once the workers start, but
+	// Enqueue reads the table from request goroutines while Handle may still be
+	// writing it during wiring, and an unsynchronized map read against a write is a
+	// fatal error no recover can catch.
+	handlersMu sync.RWMutex
+	handlers   map[string]Handler
+	started    atomic.Bool
 
 	// closeMu guards the transition to closed against a submission in flight.
 	// Checking a flag and then sending would race with closing the channel, and the
-	// loser panics on a closed channel.
+	// loser panics on a closed channel. It also orders Start's workers.Add against
+	// the Wait in Stop.
 	closeMu sync.RWMutex
 	closed  bool
 
@@ -208,8 +232,19 @@ type Memory struct {
 	finished chan struct{}
 	workers  sync.WaitGroup
 
+	// jobCtx is the parent of every handler's context. It is cancelled only when a
+	// drain runs out of time, which is what lets a handler distinguish "finish what
+	// you are doing" from "the process is going away now".
+	jobCtx     context.Context
+	cancelJobs context.CancelFunc
+
+	// beforeSend runs between the closed check and the send. It exists so a test can
+	// interleave Stop with a submission in flight deterministically; nil otherwise.
+	beforeSend func()
+
 	processed atomic.Int64
 	failed    atomic.Int64
+	abandoned atomic.Int64
 	refused   atomic.Int64
 }
 
@@ -229,12 +264,15 @@ func NewMemory(opts ...Option) *Memory {
 		}
 	}
 
+	jobCtx, cancelJobs := context.WithCancel(context.Background())
 	return &Memory{
-		settings: settings,
-		jobs:     make(chan Job, settings.buffer),
-		handlers: make(map[string]Handler),
-		shutdown: make(chan struct{}),
-		finished: make(chan struct{}),
+		settings:   settings,
+		jobs:       make(chan Job, settings.buffer),
+		handlers:   make(map[string]Handler),
+		shutdown:   make(chan struct{}),
+		finished:   make(chan struct{}),
+		jobCtx:     jobCtx,
+		cancelJobs: cancelJobs,
 	}
 }
 
@@ -253,21 +291,42 @@ func (m *Memory) Handle(name string, handler Handler) {
 	if handler == nil {
 		panic("ossein queue: handler cannot be nil")
 	}
+
+	m.handlersMu.Lock()
+	defer m.handlersMu.Unlock()
 	if _, exists := m.handlers[name]; exists {
 		panic("ossein queue: handler for " + name + " is already registered")
 	}
 	m.handlers[name] = handler
 }
 
+// handlerFor returns the handler registered for name.
+func (m *Memory) handlerFor(name string) (Handler, bool) {
+	m.handlersMu.RLock()
+	defer m.handlersMu.RUnlock()
+	handler, ok := m.handlers[name]
+	return handler, ok
+}
+
 // Start launches the worker pool. It is safe to call more than once; only the first
-// call has an effect.
+// call has an effect, and a call after Stop has none.
 func (m *Memory) Start() {
+	// The read lock both excludes a concurrent Stop and orders workers.Add before
+	// the Wait that Stop's drain goroutine performs.
+	m.closeMu.RLock()
+	defer m.closeMu.RUnlock()
+	if m.closed {
+		return
+	}
 	if !m.started.CompareAndSwap(false, true) {
 		return
 	}
-	// Snapshot the dispatch table so a worker never reads a map another goroutine
-	// could still be writing.
+
+	// Snapshot the dispatch table: it is frozen from here on, so workers dispatch
+	// without touching the lock.
+	m.handlersMu.RLock()
 	handlers := maps.Clone(m.handlers)
+	m.handlersMu.RUnlock()
 
 	for worker := 0; worker < m.settings.workers; worker++ {
 		m.workers.Add(1)
@@ -280,6 +339,10 @@ func (m *Memory) Start() {
 // It never blocks: a full queue reports ErrFull so the caller can shed load. An
 // unknown job name reports ErrNoHandler, and a queue that has begun shutting down
 // reports ErrClosed.
+//
+// ctx gates admission only. It is not the context the job runs under — the job
+// outlives the request that submitted it — so an already-cancelled ctx is reported
+// and nothing else about it is observed.
 func (m *Memory) Enqueue(ctx context.Context, job Job) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -287,7 +350,7 @@ func (m *Memory) Enqueue(ctx context.Context, job Job) error {
 	if job.Name == "" {
 		return fmt.Errorf("%w: %q", ErrNoHandler, job.Name)
 	}
-	if _, ok := m.handlers[job.Name]; !ok {
+	if _, ok := m.handlerFor(job.Name); !ok {
 		return fmt.Errorf("%w: %q", ErrNoHandler, job.Name)
 	}
 
@@ -298,8 +361,10 @@ func (m *Memory) Enqueue(ctx context.Context, job Job) error {
 	if m.closed {
 		return ErrClosed
 	}
+	if m.beforeSend != nil {
+		m.beforeSend()
+	}
 
-	job.Attempt = 0
 	select {
 	case m.jobs <- job:
 		return nil
@@ -320,9 +385,16 @@ func (m *Memory) EnqueueJSON(ctx context.Context, name string, payload any) erro
 
 // Stop stops accepting work and waits for what has been accepted to finish.
 //
-// It reports an error if the queue could not drain before ctx expired, so a shutdown
-// that dropped work is visible rather than silent. It is safe to call more than once
-// and without a preceding Start.
+// A drain that does not complete before ctx expires is reported as an error, and the
+// context every job runs under is cancelled: an in-flight handler that honors
+// cancellation can return, and no worker starts another job. Work still queued at
+// that point is lost, which is what the in-memory driver trades away.
+//
+// Accepted work that no worker ever ran — because the queue was stopped without
+// having started — is reported too, so a shutdown that dropped jobs is never
+// mistaken for a clean one.
+//
+// It is safe to call more than once and without a preceding Start.
 func (m *Memory) Stop(ctx context.Context) error {
 	m.stopOnce.Do(func() {
 		// Signalled before draining, so a worker waiting out a backoff gives up
@@ -334,12 +406,8 @@ func (m *Memory) Stop(ctx context.Context) error {
 		close(m.jobs)
 		m.closeMu.Unlock()
 
-		if !m.started.Load() {
-			// Nothing is draining it, but the queue is closed to new work.
-			close(m.finished)
-			return
-		}
-
+		// Even with no workers running, waiting is correct: the WaitGroup is empty,
+		// so this completes immediately and the queue depth below reports the drop.
 		go func() {
 			m.workers.Wait()
 			close(m.finished)
@@ -348,10 +416,19 @@ func (m *Memory) Stop(ctx context.Context) error {
 
 	select {
 	case <-m.finished:
-		return nil
 	case <-ctx.Done():
+		// Nothing will drain the rest. Cancelling here is the only signal a handler
+		// gets that finishing gracefully is no longer on the table.
+		m.cancelJobs()
 		return fmt.Errorf("ossein queue: drain did not finish: %w", ctx.Err())
 	}
+
+	if dropped := len(m.jobs); dropped > 0 {
+		return fmt.Errorf(
+			"ossein queue: %d accepted job(s) were dropped because no worker ran", dropped,
+		)
+	}
+	return nil
 }
 
 // Stats reports progress.
@@ -360,15 +437,27 @@ func (m *Memory) Stats() Stats {
 		Queued:    len(m.jobs),
 		Processed: m.processed.Load(),
 		Failed:    m.failed.Load(),
+		Abandoned: m.abandoned.Load(),
 		Refused:   m.refused.Load(),
 	}
 }
 
-// run is one worker. It consumes jobs until the queue is closed and drained.
+// run is one worker. It consumes jobs until the queue is closed and drained, or until
+// a drain that ran out of time cancels the job context.
 func (m *Memory) run(worker int, handlers map[string]Handler) {
 	defer m.workers.Done()
 
-	for job := range m.jobs {
+	for {
+		// Checked before receiving rather than alongside it: the job context is only
+		// cancelled after the channel is closed, so the receive below always returns,
+		// and a plain check keeps "stop starting work" from racing with a ready job.
+		if m.jobCtx.Err() != nil {
+			return
+		}
+		job, ok := <-m.jobs
+		if !ok {
+			return
+		}
 		m.process(worker, handlers, job)
 	}
 }
@@ -388,6 +477,7 @@ func (m *Memory) process(worker int, handlers map[string]Handler, job Job) {
 	}
 
 	var lastErr error
+	abandoned := false
 	for attempt := 1; attempt <= m.settings.maxAttempts; attempt++ {
 		job.Attempt = attempt
 
@@ -396,7 +486,7 @@ func (m *Memory) process(worker int, handlers map[string]Handler, job Job) {
 			"attempt", attempt,
 			"worker", worker,
 		)
-		ctx := ossein.ContextWithLogger(context.Background(), logger)
+		ctx := ossein.ContextWithLogger(m.jobCtx, logger)
 
 		lastErr = m.invoke(ctx, handler, job)
 		if lastErr == nil {
@@ -406,11 +496,22 @@ func (m *Memory) process(worker int, handlers map[string]Handler, job Job) {
 
 		logger.Warn("ossein queue: job failed", "error", lastErr)
 
+		// No delay after the last attempt: there is nothing left to wait for, and the
+		// wait would be added to the drain.
 		if attempt < m.settings.maxAttempts {
 			if !m.wait(m.settings.backoff(attempt)) {
+				abandoned = true
 				break
 			}
 		}
+	}
+
+	if abandoned {
+		// Still retryable, so it is not counted as failed — but the application is
+		// told, because for the in-memory driver this is its last chance to see it.
+		m.abandoned.Add(1)
+		m.reportFailure(job, fmt.Errorf("%w: %w", ErrAbandoned, lastErr))
+		return
 	}
 
 	m.failed.Add(1)
@@ -461,6 +562,10 @@ func (m *Memory) reportFailure(job Job, err error) {
 		}
 	}()
 
+	// Deliberately not derived from jobCtx. This is the application's last chance to
+	// record the job, and a drain that ran out of time has already cancelled that
+	// context — handing over a dead context would deny the dead-letter write the very
+	// moment it matters most.
 	logger := m.settings.logger.With("job", job.Name, "attempt", job.Attempt)
 	m.settings.onFailure(ossein.ContextWithLogger(context.Background(), logger), job, err)
 }
@@ -488,6 +593,11 @@ func (m *Memory) wait(delay time.Duration) bool {
 // The queue starts with the application and drains during shutdown. Register it after
 // anything its jobs depend on, such as a database: stop hooks run in reverse, so the
 // workers then finish before their dependencies close.
+//
+// That ordering holds for a drain that completes. If it exceeds the shutdown timeout,
+// Stop reports an error and cancels the job context, and a handler that ignores
+// cancellation can still be running when its dependencies close — the reason a job
+// should honor the context it is given.
 func Register(app *ossein.App, work *Memory) error {
 	if app == nil {
 		return errors.New("ossein queue: app cannot be nil")

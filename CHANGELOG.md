@@ -127,9 +127,17 @@ Ossein uses semantic versioning for published releases.
   shed load with a `503` instead of reporting back-pressure as a server fault; a
   panicking job becomes an error for the retry path rather than taking the worker
   down, and a job whose name has no handler is refused at enqueue time, where the
-  caller can still see it. `Stats` exposes queue depth and processed, failed, and
-  refused counts for a health endpoint. In-process means in-memory: pending jobs
-  do not survive a crash, which the package documents rather than papers over
+  caller can still see it. A job runs under a context that a graceful drain leaves
+  alone — draining means waiting for the job, not interrupting it — and that is
+  cancelled when the drain runs out of time, so a handler can tell "finish up" from
+  "the process is going away". `Stop` reports what it could not finish, including
+  accepted work that no worker ever ran, so a dropped job is never reported as a
+  clean shutdown. `ErrAbandoned` marks a job whose retries were cut short by
+  shutdown rather than exhausted, because filing those as dead letters means
+  recording live work as dead on every deploy. `Stats` exposes queue depth and
+  processed, failed, abandoned, and refused counts for a health endpoint.
+  In-process means in-memory: pending jobs do not survive a crash, which the
+  package documents rather than papers over
 - `ossein.ContextWithLogger` puts a logger into a context that did not come from
   a request, so background work logs through the same handler as the rest of the
   application
