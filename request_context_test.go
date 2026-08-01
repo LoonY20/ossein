@@ -114,3 +114,53 @@ func TestRequestContextPreservesIncomingRequestID(t *testing.T) {
 		t.Fatalf("expected incoming request ID response header, got %q", got)
 	}
 }
+
+// TestContextWithRequestIDIsFoundByRequestIDFromContext covers the carrier for a
+// request's identity into work that outlives it — a queue job, a scheduled task.
+func TestContextWithRequestIDIsFoundByRequestIDFromContext(t *testing.T) {
+	ctx := ContextWithRequestID(context.Background(), "req-42")
+
+	if got := RequestIDFromContext(ctx); got != "req-42" {
+		t.Fatalf("RequestIDFromContext = %q", got)
+	}
+}
+
+// TestContextWithRequestIDIgnoresAnEmptyID keeps a job with no origin from carrying
+// an empty ID, which reads as one that was lost rather than one that never existed.
+func TestContextWithRequestIDIgnoresAnEmptyID(t *testing.T) {
+	type marker struct{}
+
+	parent := context.WithValue(context.Background(), marker{}, "kept")
+	ctx := ContextWithRequestID(parent, "")
+
+	if ctx != parent {
+		t.Fatal("expected the parent context itself, not a wrapper around it")
+	}
+	if got := RequestIDFromContext(ctx); got != "" {
+		t.Fatalf("RequestIDFromContext = %q, want empty", got)
+	}
+}
+
+func TestContextWithRequestIDAcceptsANilContext(t *testing.T) {
+	//lint:ignore SA1012 the nil context is the case under test.
+	ctx := ContextWithRequestID(nil, "req-42") //nolint:staticcheck
+	if ctx == nil {
+		t.Fatal("ContextWithRequestID returned a nil context")
+	}
+	if got := RequestIDFromContext(ctx); got != "req-42" {
+		t.Fatalf("RequestIDFromContext = %q", got)
+	}
+}
+
+// TestRequestIDFromContextToleratesANilContext matches the other accessors: a
+// context is optional in background code, and asking for an ID that is not there
+// is a miss rather than a panic.
+func TestRequestIDFromContextToleratesANilContext(t *testing.T) {
+	//lint:ignore SA1012 the nil context is the case under test.
+	if got := RequestIDFromContext(nil); got != "" { //nolint:staticcheck
+		t.Fatalf("RequestIDFromContext(nil) = %q", got)
+	}
+	if got := RequestIDFromContext(context.Background()); got != "" {
+		t.Fatalf("RequestIDFromContext = %q for a context with no ID", got)
+	}
+}

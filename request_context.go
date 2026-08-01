@@ -66,6 +66,23 @@ func RequestIDFromContext(ctx context.Context) string {
 	return requestID
 }
 
+// ContextWithRequestID returns a context carrying requestID, so
+// RequestIDFromContext finds it.
+//
+// It exists to carry a request's identity into work that outlives it. A queue job
+// enqueued by a request should log under the same ID, or the two halves of a
+// webhook — the delivery and its processing — cannot be found together. Passing an
+// empty ID returns ctx unchanged.
+func ContextWithRequestID(ctx context.Context, requestID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if requestID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestIDContextKey{}, requestID)
+}
+
 // ContextWithLogger returns a context carrying logger, so LoggerFromContext finds it.
 //
 // It exists for work that is not a request: a queue worker, a scheduled task, a

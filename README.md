@@ -641,9 +641,34 @@ retried from its source — a webhook the provider will redeliver — and the wr
 one for work that must not be lost, which needs a durable driver behind the same
 `Enqueuer` interface.
 
-Background work has no request to inherit a logger from.
-`ossein.ContextWithLogger` puts one into a context, so a worker logs through the
-same handler as the rest of the application:
+### Correlating a job with the request that enqueued it
+
+`Enqueue` copies the request ID out of the context onto the job, and the worker puts
+it back, so both halves of an asynchronous request appear in the log under one ID:
+
+```
+level=INFO msg="request completed" request_id=8f7aab71 method=POST path=/webhooks
+level=INFO msg="delivering downstream" request_id=8f7aab71 job=webhook.delivery attempt=1
+```
+
+`ossein.RequestIDFromContext` works inside a job handler for the same reason. The ID
+travels on the `Job`, so a durable driver keeps the connection across a restart, and
+`Job.RequestID` can be set explicitly for work whose origin the context does not know —
+a replay, or a job restored from storage. Work with no origin carries no ID rather than
+an empty one, which would read as an ID that was lost.
+
+Background work started from a handler rather than a queue keeps its identity through
+`context.WithoutCancel`: the request ID and logger are context values, so they survive,
+and only the cancellation that fires when the response completes is dropped.
+
+```go
+detached := context.WithoutCancel(c.Context())
+go func() { report(detached) }()
+```
+
+Work with no request at all still needs a logger. `ossein.ContextWithLogger` puts one
+into a context, and `ossein.ContextWithRequestID` an identity, so a scheduled task logs
+the way the rest of the application does:
 
 ```go
 ctx := ossein.ContextWithLogger(context.Background(), logger)

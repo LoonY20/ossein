@@ -786,7 +786,7 @@ Also fixed: `RegisterMemory`'s stop hook waited for a goroutine that a failed or
 `Start` never launched, so shutdown blocked forever — and `App.Stop` attempts every hook,
 so one blocked hook takes the rest with it.
 
-### 14. Background work cannot inherit request identity
+### 14. Background work cannot inherit request identity — RESOLVED
 
 The request ID and request-scoped logger live only in the request context, which
 is cancelled when the response completes, so deferred work cannot use it:
@@ -816,6 +816,20 @@ library, and `ossein.Detach` would be a thin alias for it. What is genuinely mis
 is the other direction — a job cannot be correlated with the request that enqueued
 it, because `Job` carries no place to put the ID and the worker builds its context
 from scratch. That is the part worth designing.
+
+**Resolution.** `Job.RequestID`, filled in by `Enqueue` from the context and restored
+by the worker, plus `ossein.ContextWithRequestID` to carry an identity into work that
+has no request. `hooksink` proves it end to end: the delivery's access-log line and the
+worker's own line share an ID.
+
+`ossein.Detach` was **not** added. It would be `context.WithoutCancel` under a different
+name, and a framework that renames standard-library functions is the thing this project
+exists not to be. The idiom is documented in the README instead, next to the queue,
+which is where someone looks for it.
+
+The ID lives on the `Job` rather than only in the worker's context, so a durable driver
+keeps the connection across a restart — the case where correlating by timestamp is
+hardest and matters most.
 
 ### 15. No driver-neutral SQL error classification
 

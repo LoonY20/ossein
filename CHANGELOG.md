@@ -228,6 +228,16 @@ Ossein uses semantic versioning for published releases.
   entries is empty, so "not configured" stays distinguishable from "configured empty".
   Maps remain unsupported, deliberately — their environment encoding needs two arbitrary
   separators
+- `Job.RequestID` carries the identity of whatever enqueued a job, filled in by
+  `Enqueue` from the context and put back by the worker, so both halves of an
+  asynchronous request log under one ID and `ossein.RequestIDFromContext` works inside a
+  job handler. A webhook accepted under one request and processed later on a worker could
+  otherwise only be connected by guessing from timestamps. The ID travels with the job, so
+  a durable driver keeps the connection across a restart, and it can be set explicitly for
+  work whose origin the context does not know. Work with no origin carries no ID rather
+  than an empty one
+- `ossein.ContextWithRequestID` puts a request ID into a context, for the same reason
+  `ContextWithLogger` exists: work that outlives a request still belongs to it
 - `ossein.ContextWithLogger` puts a logger into a context that did not come from
   a request, so background work logs through the same handler as the rest of the
   application
