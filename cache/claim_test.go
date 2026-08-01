@@ -3,6 +3,7 @@ package cache_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -264,7 +265,7 @@ func (basicStore) Set(context.Context, string, []byte, time.Duration) error {
 func (basicStore) Delete(context.Context, string) error { return nil }
 
 func containsType(message string) bool {
-	return len(message) > 0 && message[len(message)-len("basicStore"):] == "basicStore"
+	return strings.Contains(message, "basicStore")
 }
 
 // TestAddOnTheZeroValue covers the documented promise that a zero Memory is
@@ -287,4 +288,229 @@ func TestAddOnTheZeroValue(t *testing.T) {
 	if string(value) != "v" {
 		t.Fatalf("value = %q", value)
 	}
+}
+
+// TestClaimRejectsANonPositiveLease keeps a claim from becoming a tombstone. A
+// zero TTL never expires, so a crash between claiming and working would block
+// that key for the life of the process, with nothing to say why.
+func TestClaimRejectsANonPositiveLease(t *testing.T) {
+	store := cache.NewMemory()
+
+	for _, ttl := range []time.Duration{0, -time.Second} {
+		claimed, err := cache.Claim(context.Background(), store, "key", ttl)
+		if !errors.Is(err, cache.ErrInvalidTTL) {
+			t.Fatalf("ttl %v error = %v, want ErrInvalidTTL", ttl, err)
+		}
+		if claimed {
+			t.Fatalf("ttl %v was accepted", ttl)
+		}
+	}
+
+	// Add itself still follows Set's rule, since it is the general capability
+	// rather than the lease helper.
+	stored, err := store.Add(context.Background(), "key", []byte("v"), 0)
+	if err != nil || !stored {
+		t.Fatalf("Add with a zero TTL = %v, %v", stored, err)
+	}
+}
+
+func TestClaimValidatesTheKey(t *testing.T) {
+	store := cache.NewMemory()
+	if _, err := cache.Claim(context.Background(), store, "", time.Minute); !errors.Is(err, cache.ErrInvalidKey) {
+		t.Fatalf("error = %v, want ErrInvalidKey", err)
+	}
+}
+
+// TestClaimNamesTheKeyInADriverError is what makes a failure actionable: a claim
+// error in a log otherwise says only that something could not be claimed.
+func TestClaimNamesTheKeyInADriverError(t *testing.T) {
+	_, err := cache.Claim(context.Background(), failingAdder{}, "delivery:42", time.Minute)
+	if err == nil {
+		t.Fatal("expected the driver error")
+	}
+	if !strings.Contains(err.Error(), `"delivery:42"`) {
+		t.Fatalf("error = %v, want it to name the key", err)
+	}
+	if !errors.Is(err, errDriverDown) {
+		t.Fatalf("error = %v, want the driver error preserved", err)
+	}
+}
+
+// TestOnceRunsWorkAtMostOnce covers the helper's happy path and its exclusion.
+func TestOnceRunsWorkAtMostOnce(t *testing.T) {
+	store := cache.NewMemory()
+	ctx := context.Background()
+
+	var runs atomic.Int64
+	work := func(context.Context) error {
+		runs.Add(1)
+		return nil
+	}
+
+	ran, err := cache.Once(ctx, store, "job:1", time.Minute, work)
+	if err != nil || !ran {
+		t.Fatalf("Once = %v, %v", ran, err)
+	}
+
+	ran, err = cache.Once(ctx, store, "job:1", time.Minute, work)
+	if err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	if ran {
+		t.Fatal("the work ran twice")
+	}
+	if runs.Load() != 1 {
+		t.Fatalf("the work ran %d times", runs.Load())
+	}
+}
+
+// TestOnceReleasesTheClaimWhenWorkFails is the whole reason the helper exists.
+// A claim taken for work that then failed turns "this might run twice" into
+// "this can never run again" — for a webhook receiver, a delivery the provider
+// was told to resend, answered as a duplicate and lost.
+func TestOnceReleasesTheClaimWhenWorkFails(t *testing.T) {
+	store := cache.NewMemory()
+	ctx := context.Background()
+
+	failure := errors.New("downstream refused")
+	ran, err := cache.Once(ctx, store, "job:1", time.Hour, func(context.Context) error {
+		return failure
+	})
+	if !errors.Is(err, failure) {
+		t.Fatalf("error = %v, want the work's own error", err)
+	}
+	if ran {
+		t.Fatal("Once reported the work as done after it failed")
+	}
+
+	// The key is free again, so a retry can take it.
+	var retried bool
+	ran, err = cache.Once(ctx, store, "job:1", time.Hour, func(context.Context) error {
+		retried = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if !ran || !retried {
+		t.Fatal("the claim was not released, so the retry was refused")
+	}
+}
+
+// TestOnceReleasesEvenWhenTheContextIsDone covers the case where releasing
+// matters most: work that failed because its deadline passed. Releasing through
+// the same dead context would deny exactly the retry the failure calls for.
+func TestOnceReleasesEvenWhenTheContextIsDone(t *testing.T) {
+	store := cache.NewMemory()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ran, err := cache.Once(ctx, store, "job:1", time.Hour, func(context.Context) error {
+		cancel()
+		return context.Canceled
+	})
+	if ran {
+		t.Fatal("Once reported the work as done")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+
+	claimed, err := cache.Claim(context.Background(), store, "job:1", time.Hour)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("the claim survived a cancelled context, so the work can never retry")
+	}
+}
+
+// TestOnceReportsAFailedRelease keeps a claim that could not be dropped from
+// looking like a clean failure: the work will not retry, and the caller needs to
+// know that as well as why the work failed.
+func TestOnceReportsAFailedRelease(t *testing.T) {
+	failure := errors.New("downstream refused")
+	ran, err := cache.Once(context.Background(), undeletableStore{cache.NewMemory()},
+		"job:1", time.Hour, func(context.Context) error { return failure })
+
+	if !ran {
+		t.Fatal("a claim that could not be released must be reported as still held")
+	}
+	if !errors.Is(err, failure) {
+		t.Fatalf("error = %v, want the work's error preserved", err)
+	}
+	if !errors.Is(err, errDeleteDown) {
+		t.Fatalf("error = %v, want the release failure reported too", err)
+	}
+}
+
+func TestOnceRejectsNilWork(t *testing.T) {
+	if _, err := cache.Once(context.Background(), cache.NewMemory(), "k", time.Minute, nil); !errors.Is(err, cache.ErrNilLoader) {
+		t.Fatalf("error = %v, want ErrNilLoader", err)
+	}
+}
+
+func TestOncePropagatesAClaimFailure(t *testing.T) {
+	var ran bool
+	claimed, err := cache.Once(context.Background(), basicStore{}, "k", time.Minute,
+		func(context.Context) error { ran = true; return nil })
+
+	if !errors.Is(err, cache.ErrNotAtomic) {
+		t.Fatalf("error = %v, want ErrNotAtomic", err)
+	}
+	if claimed || ran {
+		t.Fatal("work ran without a claim")
+	}
+}
+
+var (
+	errDriverDown = errors.New("driver is down")
+	errDeleteDown = errors.New("delete is down")
+)
+
+// failingAdder claims nothing and says why.
+type failingAdder struct{ basicStore }
+
+func (failingAdder) Add(context.Context, string, []byte, time.Duration) (bool, error) {
+	return false, errDriverDown
+}
+
+// undeletableStore can claim but cannot release, the shape of a backend that is
+// partly unreachable.
+type undeletableStore struct{ *cache.Memory }
+
+func (undeletableStore) Delete(context.Context, string) error { return errDeleteDown }
+
+// TestClaimValidatesBeforeReachingTheStore keeps the helper's own guarantees off
+// the driver. A third-party Adder that skips validation would otherwise decide
+// what an empty key means, and each one differently.
+func TestClaimValidatesBeforeReachingTheStore(t *testing.T) {
+	spy := &recordingAdder{}
+
+	if _, err := cache.Claim(context.Background(), spy, "", time.Minute); !errors.Is(err, cache.ErrInvalidKey) {
+		t.Fatalf("error = %v, want ErrInvalidKey", err)
+	}
+	if _, err := cache.Claim(context.Background(), spy, "key", 0); !errors.Is(err, cache.ErrInvalidTTL) {
+		t.Fatalf("error = %v, want ErrInvalidTTL", err)
+	}
+	if spy.calls.Load() != 0 {
+		t.Fatalf("the store was called %d times for arguments the helper rejects", spy.calls.Load())
+	}
+
+	if _, err := cache.Claim(context.Background(), spy, "key", time.Minute); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if spy.calls.Load() != 1 {
+		t.Fatalf("the store was called %d times, want 1", spy.calls.Load())
+	}
+}
+
+// recordingAdder accepts everything and counts what reached it.
+type recordingAdder struct {
+	basicStore
+	calls atomic.Int64
+}
+
+func (a *recordingAdder) Add(context.Context, string, []byte, time.Duration) (bool, error) {
+	a.calls.Add(1)
+	return true, nil
 }

@@ -697,6 +697,31 @@ as an application bug in a system nobody suspects, long after the store was swap
 network cache. An error at the call site names the actual problem. The in-memory driver
 implements `Adder`, so the default path is unaffected; a driver that cannot must say so.
 
+**And the defect the review found in the first implementation, which I had introduced:**
+claiming the idempotency key *before* enqueueing meant that a delivery shed with a `503` —
+asking the provider to resend — kept its claim, and the resend was then answered as a
+duplicate. The delivery was never processed and could not be for 24 hours. Making the
+concurrent case correct had converted duplicate work into **lost** work, which for a
+webhook receiver is strictly worse, and the shape came straight from the proposal in this
+note.
+
+`cache.Once` exists because of that: it claims, runs the work, and releases the claim if
+the work fails. Releasing goes through `context.WithoutCancel`, since work that failed
+because its context ended is exactly the case where the release matters and a dead
+context would deny it.
+
+Two more things the review turned up, both of which the tests said were covered:
+
+- **`Add`'s eviction bookkeeping had no coverage at all.** Three mutations that corrupt
+  it — dropping the removal of a replaced element, never tracking a new one, tracking one
+  twice — all passed the suite, each producing an unbounded leak of list elements that
+  nothing would ever reclaim. The test that claimed to guard it called `PurgeExpired`,
+  which walks the map and never looks at the list, so it could not fail for its stated
+  reason. There is now an invariant check over both structures and a 400-operation hammer.
+- **Nothing verified that `Claim`'s TTL reached the store.** Dropping it, or shortening it
+  to a nanosecond, passed both suites — the second being precisely the failure the claim
+  exists to prevent, since a retry a millisecond later would be accepted as new work.
+
 ### 13. The memory cache has no bound on resident size
 
 Write-only keys *are* reclaimed: `Set` calls `purgeSampleLocked` on every write

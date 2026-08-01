@@ -182,13 +182,20 @@ func (m *Memory) currentTime() time.Time {
 	return m.now()
 }
 
-var _ Store = (*Memory)(nil)
+var (
+	_ Store = (*Memory)(nil)
+	// Asserted as well as implemented: Adder is reached by type assertion, so a
+	// signature drift would silently demote this driver and turn every Claim into
+	// ErrNotAtomic, with nothing failing to compile.
+	_ Adder = (*Memory)(nil)
+)
 
 // Add stores a value only when the key is free, and reports whether it did.
 //
 // The check and the write happen under one lock, which is what separates this
 // from Get followed by Set: there is no window for a second caller to see the
-// same miss.
+// same miss. A zero TTL stores a value that never expires, as Set does, so the
+// key stays taken until it is deleted.
 func (m *Memory) Add(
 	ctx context.Context,
 	key string,

@@ -90,7 +90,7 @@ Today Ossein intentionally stays small:
 - generic test factories with sequences, states, and persistence hooks;
 - composed application command handling for migrations and seeders;
 - backend-neutral cache contract, concurrency-safe in-memory driver, typed
-  JSON/remember helpers, and an atomic claim for idempotency keys;
+  JSON/remember helpers, and atomic claims for idempotency keys and run-once work;
 - a bounded in-process job queue with a worker pool, per-name handlers, retries
   with backoff, load shedding through sentinel errors, and a drain on shutdown,
   behind an `Enqueuer` interface a durable driver can replace;
@@ -439,28 +439,47 @@ user, err := cache.RememberJSON(ctx, store, "user:42", time.Minute,
     func(ctx context.Context) (User, error) { return users.Find(ctx, 42) })
 ```
 
-Claiming a key is separate, because not every backend can do it as one operation:
+Doing something at most once needs more than `Get` and `Set`:
 
 ```go
-claimed, err := cache.Claim(ctx, store, "delivery:"+id, 24*time.Hour)
+accepted, err := cache.Once(ctx, store, "delivery:"+id, 24*time.Hour,
+    func(ctx context.Context) error {
+        return work.EnqueueJSON(ctx, "webhook.delivery", delivery)
+    })
 if err != nil {
     return err
 }
-if !claimed {
+if !accepted {
     return c.JSON(http.StatusOK, map[string]string{"status": "duplicate"})
 }
 ```
 
-That is an idempotency key, and it is also a run-once job and a lease. The
+That is an idempotency key; the same shape is a run-once job or a lease. The
 `Get`-then-`Set` it replaces is racy by construction: two callers both miss, both
 store, and both proceed. The window is sub-microsecond against a local map, so it
 rarely appears in testing, and routine against a network cache — which is exactly
 where duplicate work costs something.
 
-`Claim` needs a store implementing `cache.Adder` and reports `ErrNotAtomic`
-otherwise, rather than falling back to the racy form. A guarantee that quietly is
-not one produces duplicate processing that looks like an application bug; an error
-at the call site names the real problem. The in-memory driver implements it.
+`Once` releases the key when the work returns an error, which is the part worth
+having a helper for. A claim taken before the work and kept when the work does not
+happen turns "this might run twice" into "this can never run again": a webhook
+receiver that sheds a delivery with `503`, asking the provider to resend, then
+answers the resend as a duplicate and loses it for the whole window. Trading
+duplicate work for lost work is the worse bargain, and it is not obvious from the
+call site.
+
+`cache.Claim` is the primitive underneath, for work whose lifetime is not a
+function call. Releasing it is then the caller's job.
+
+Both need a store implementing `cache.Adder` and report `ErrNotAtomic` otherwise,
+rather than falling back to the racy form. A guarantee that quietly is not one
+produces duplicate processing that looks like an application bug; an error at the
+call site names the real problem. The in-memory driver implements it — but a
+decorator around a store erases the capability unless it forwards `Add`.
+
+A claim is a lease, so its TTL must be positive. One that never expires is a
+tombstone: a crash between claiming and working would block that key until
+something deletes it by hand.
 
 ## Background jobs
 

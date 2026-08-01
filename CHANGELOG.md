@@ -123,7 +123,15 @@ Ossein uses semantic versioning for published releases.
   and routine against a network cache, which is exactly where duplicate work is expensive.
   `Claim` reports `ErrNotAtomic` against a store that cannot provide the guarantee rather
   than falling back to the racy form, because a guarantee that quietly is not one produces
-  a failure that looks like an application bug
+  a failure that looks like an application bug. A claim is a lease, so its TTL must be
+  positive: one that never expires is a tombstone that only an explicit delete can lift
+- `cache.Once` runs work at most once per key and releases the claim if the work fails.
+  Claiming before the work and keeping the claim when the work did not happen turns "this
+  might run twice" into "this can never run again" — a webhook receiver that sheds a
+  delivery with a `503`, asking the provider to resend, then answers the resend as a
+  duplicate and loses it for the whole idempotency window. That trade is the worse one and
+  is not visible at the call site, which is why it belongs in a helper rather than in a
+  documented pattern
 - a `queue` package for background work: `queue.Memory` is a bounded in-process
   job queue with a worker pool, per-job-name handlers, retries with backoff, and
   a drain on shutdown, and `queue.Register` ties it into the application
