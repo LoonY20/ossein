@@ -1,6 +1,7 @@
 package ossein
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -464,41 +465,56 @@ func TestEventStreamOnANilStream(t *testing.T) {
 	}
 }
 
-// TestEventStreamSurvivingItsHandlerReportsAnError covers the natural mistake of handing
-// the stream to a producer goroutine. net/http clears the response writer once the
-// handler returns, so a later write is a nil dereference — on a goroutine no recovery
+// TestEventStreamRecoversAPanicFromTheWriter covers the natural mistake of handing the
+// stream to a producer goroutine. net/http releases the response once the handler
+// returns, so a later write dereferences a nil buffer — on a goroutine no recovery
 // middleware is watching, which takes the process down.
-func TestEventStreamSurvivingItsHandlerReportsAnError(t *testing.T) {
-	streams := make(chan *EventStream, 1)
+//
+// The panic is simulated rather than provoked, because provoking it means writing to a
+// response net/http is concurrently recycling: a genuine data race, which is not
+// something to leave in a suite that runs under the race detector. Recovering does not
+// make that write safe; it makes the mistake reportable instead of fatal.
+func TestEventStreamRecoversAPanicFromTheWriter(t *testing.T) {
+	released := &releasedWriter{ResponseRecorder: httptest.NewRecorder()}
+	c := &Context{
+		Response: NewResponseWriter(released),
+		Request:  httptest.NewRequest(http.MethodGet, "/events", nil),
+	}
 
-	server := httptest.NewServer(New().Handler())
-	defer server.Close()
-
-	app := New()
-	app.Get("/events", func(c *Context) error {
-		stream, err := c.EventStream()
-		if err != nil {
-			return err
-		}
-		streams <- stream
-		return stream.Send(Event{Data: "one"})
-	})
-
-	live := httptest.NewServer(app)
-	defer live.Close()
-
-	response, err := http.Get(live.URL + "/events")
+	stream, err := c.EventStream()
 	if err != nil {
-		t.Fatalf("GET: %v", err)
+		t.Fatalf("EventStream: %v", err)
 	}
-	response.Body.Close()
 
-	stream := <-streams
-	// The handler has returned; this is the write that used to panic.
-	if err := stream.Send(Event{Data: "late"}); err == nil {
-		t.Fatal("a write after the handler returned was reported as success")
+	released.released = true
+
+	err = stream.Send(Event{Data: "late"})
+	if err == nil {
+		t.Fatal("a write to a released response was reported as success")
 	}
-	if err := stream.Send(Event{Data: "later"}); err == nil {
-		t.Fatal("the stream did not close itself after failing")
+	if !strings.Contains(err.Error(), "outlives its handler") {
+		t.Fatalf("error = %v, want it to name the cause", err)
 	}
+
+	// And the stream closes itself, so a producer loop stops on the next iteration
+	// rather than panicking again on every one.
+	if err := stream.Send(Event{Data: "later"}); err == nil ||
+		!strings.Contains(err.Error(), "closed") {
+		t.Fatalf("error = %v, want the stream to have closed itself", err)
+	}
+}
+
+// releasedWriter panics on write once the response has been released, which is what
+// net/http's writer does after a handler returns.
+type releasedWriter struct {
+	*httptest.ResponseRecorder
+	released bool
+}
+
+func (w *releasedWriter) Write(p []byte) (int, error) {
+	if w.released {
+		var buffer *bytes.Buffer
+		return buffer.Write(p) // nil dereference, as net/http produces
+	}
+	return w.ResponseRecorder.Write(p)
 }

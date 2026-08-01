@@ -772,9 +772,11 @@ is rejected for the same reason, and an event with no data is rejected because n
 dispatches one. `Comment` writes a keepalive that clients ignore.
 
 A stream must not outlive its handler: `net/http` releases the response once the handler
-returns. Handing the stream to a producer goroutine and writing late used to panic that
-goroutine, where no recovery middleware would see it; it now comes back as an error and
-the stream closes itself.
+returns, so writing after that races the server recycling it. Handing the stream to a
+producer goroutine and writing late panics that goroutine, where no recovery middleware
+would see it — the write is recovered into an error and the stream closes itself, which
+makes the mistake reportable rather than fatal, but does not make it safe. Keep the
+stream inside its handler.
 
 ## Errors
 

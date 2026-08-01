@@ -176,6 +176,10 @@ func (s *EventStream) Close() {
 // and a producer goroutine holding the stream is a natural enough shape that it should
 // come back as an error rather than take the process down from a goroutine no recovery
 // middleware is watching.
+//
+// It makes the mistake reportable, not safe: the server is concurrently recycling the
+// response by then, so the write is a data race whether or not it panics. A stream
+// belongs to its handler.
 func (s *EventStream) write(frame string) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {

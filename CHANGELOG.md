@@ -169,8 +169,9 @@ Ossein uses semantic versioning for published releases.
   rest be read as forged fields; a line break in an id, name, or comment is rejected for
   the same reason. An event with no data is rejected, since no client dispatches one — a
   retry on its own is still allowed, being a directive rather than an event. A write from
-  a stream that outlived its handler is reported as an error instead of panicking a
-  goroutine no recovery middleware is watching. `X-Accel-Buffering: no` is set, without which nginx holds every event until its
+  a stream that outlived its handler is recovered into an error instead of panicking a
+  goroutine no recovery middleware is watching — reportable rather than fatal, though
+  still a mistake, since net/http is concurrently recycling the response by then. `X-Accel-Buffering: no` is set, without which nginx holds every event until its
   proxy buffer fills. The Ossein response writer is preserved, so a stream is logged and
   the error handler will not write over it
 - typed configuration understands more than scalars. `[]string`, `[]int`, and lists
