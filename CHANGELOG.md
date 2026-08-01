@@ -138,6 +138,42 @@ Ossein uses semantic versioning for published releases.
   processed, failed, abandoned, and refused counts for a health endpoint.
   In-process means in-memory: pending jobs do not survive a crash, which the
   package documents rather than papers over
+- response helpers on `Context` for everything other than JSON: `Text`, `HTML`, `Blob`,
+  `Stream`, `Redirect`, `File`, `FileFS`, and `Attachment`, with `Text`, `HTML`, `Blob`,
+  `Stream`, and `Redirect` also available as package-level functions for plain
+  `net/http` handlers. All of them write through the Ossein response writer, so status
+  and size tracking, the access log, and the committed-response guard keep working —
+  which is what dropping to the raw writer costs. An unspecified content type becomes
+  `application/octet-stream` rather than being left for `net/http` to sniff, since
+  sniffing is how a text upload comes back as HTML, and each of them refuses to write
+  over a response that was already sent rather than appending a second body to it.
+  `Redirect` accepts only a status that redirects — 301, 302, 303, 307, 308, not the rest
+  of the 3xx range, where Location means something else and 304 must not carry the body
+  `http.Redirect` writes — and rejects a location containing a line break, which Go
+  replaces with spaces rather than rejecting, leaving a redirect to somewhere nobody
+  wrote. `File` delegates to `net/http`, so range and conditional requests work, but
+  reports a missing file, a directory, or an unreadable path as an error, so a handler
+  can fall back and the response stays in the application's error contract instead of
+  ServeFile's plain-text 404. `FileFS` exists next to it because a name from a request
+  must not be able to escape the directory it is served from; and `Attachment` encodes
+  the filename with `mime.FormatMediaType` and sets the header only once the file is
+  known to exist, since a download name is frequently user data and would otherwise be
+  stamped on an error response
+- `Context.EventStream` for server-sent events. Headers are written and flushed when the
+  stream opens, so the connection is live before the first event and a writer that cannot
+  flush is reported there rather than at the first send — a stream that cannot flush
+  delivers nothing until the handler returns, which for a stream is never. Multi-line
+  data becomes multiple data lines and one trailing terminator does not end the event
+  early. Carriage returns in data are normalized to newlines, because a client ends a
+  line on CR as well and a bare one left in place would end the data line and let the
+  rest be read as forged fields; a line break in an id, name, or comment is rejected for
+  the same reason. An event with no data is rejected, since no client dispatches one — a
+  retry on its own is still allowed, being a directive rather than an event. A write from
+  a stream that outlived its handler is recovered into an error instead of panicking a
+  goroutine no recovery middleware is watching — reportable rather than fatal, though
+  still a mistake, since net/http is concurrently recycling the response by then. `X-Accel-Buffering: no` is set, without which nginx holds every event until its
+  proxy buffer fills. The Ossein response writer is preserved, so a stream is logged and
+  the error handler will not write over it
 - typed configuration understands more than scalars. `[]string`, `[]int`, and lists
   of any supported element type come from a comma-separated value, with entries
   trimmed and empty ones dropped, so a trailing comma is not a phantom element and a

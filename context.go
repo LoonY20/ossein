@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"mime"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -233,4 +236,111 @@ func bindJSONError(err error, invalidJSONMessage string) error {
 		).WithCause(err)
 	}
 	return BadRequest("invalid_json", invalidJSONMessage).WithCause(err)
+}
+
+// Text writes a plain-text response.
+func (c *Context) Text(status int, text string) error {
+	return Text(c.Response, status, text)
+}
+
+// HTML writes an HTML response. Escaping untrusted values is html/template's job.
+func (c *Context) HTML(status int, markup string) error {
+	return HTML(c.Response, status, markup)
+}
+
+// Blob writes bytes with an explicit content type.
+func (c *Context) Blob(status int, contentType string, data []byte) error {
+	return Blob(c.Response, status, contentType, data)
+}
+
+// Stream copies from source without buffering it.
+func (c *Context) Stream(status int, contentType string, source io.Reader) error {
+	return Stream(c.Response, status, contentType, source)
+}
+
+// Redirect answers with a redirect to location. The status must be a 3xx.
+func (c *Context) Redirect(status int, location string) error {
+	return Redirect(c.Response, c.Request, status, location)
+}
+
+// File serves a file from the filesystem, with range requests, conditional requests,
+// and content-type detection handled by net/http.
+//
+// A missing file, a directory, or an unreadable path is returned as an error rather
+// than being answered by net/http, for two reasons: the handler can fall back or log,
+// and the response stays in the application's error contract instead of the plain-text
+// "404 page not found" that ServeFile would write into a JSON API.
+//
+// The path is trusted. Never build one from request data: nothing here prevents
+// "../../etc/passwd" from resolving. Serve user-selected files with FileFS, which
+// cannot escape the filesystem it is given.
+func (c *Context) File(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileError(path, err)
+	}
+	if info.IsDir() {
+		return NotFound("file_not_found", "File does not exist")
+	}
+	if err := ensureUncommitted(c.Response, "serve file"); err != nil {
+		return err
+	}
+
+	http.ServeFile(c.Response, c.Request, path)
+	return nil
+}
+
+// FileFS serves a file from fsys. Unlike File, the name cannot escape fsys, so this is
+// the one to use when the name comes from the request.
+func (c *Context) FileFS(fsys fs.FS, name string) error {
+	info, err := fs.Stat(fsys, name)
+	if err != nil {
+		return fileError(name, err)
+	}
+	if info.IsDir() {
+		return NotFound("file_not_found", "File does not exist")
+	}
+	if err := ensureUncommitted(c.Response, "serve file"); err != nil {
+		return err
+	}
+
+	http.ServeFileFS(c.Response, c.Request, fsys, name)
+	return nil
+}
+
+// fileError maps a lookup failure to the response it deserves. A missing file is the
+// client's answer; anything else — a permission problem, a broken mount — is the
+// server's, and says so rather than reporting the resource as absent.
+func fileError(name string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return NotFound("file_not_found", "File does not exist")
+	}
+	return fmt.Errorf("ossein: serve file %q: %w", name, err)
+}
+
+// Attachment serves a file as a download named filename.
+//
+// The name is encoded with mime.FormatMediaType, so a quote, a newline, or a non-ASCII
+// character in it cannot break out of the header — a download name is frequently user
+// data. Anything unrepresentable is percent-encoded into the RFC 5987 filename* form
+// rather than dropped.
+func (c *Context) Attachment(path, filename string) error {
+	if filename == "" {
+		return errors.New("ossein: attachment filename cannot be empty")
+	}
+
+	// Checked before the header is set. Setting it first and letting File fail would
+	// leave the name — often user data — on an error response, and a browser following
+	// that download saves the error page under it.
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileError(path, err)
+	}
+	if info.IsDir() {
+		return NotFound("file_not_found", "File does not exist")
+	}
+
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	c.Response.Header().Set("Content-Disposition", disposition)
+	return c.File(path)
 }

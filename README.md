@@ -94,7 +94,8 @@ Today Ossein intentionally stays small:
 - a bounded in-process job queue with a worker pool, per-name handlers, retries
   with backoff, load shedding through sentinel errors, and a drain on shutdown,
   behind an `Enqueuer` interface a durable driver can replace;
-- JSON response helpers;
+- response helpers for JSON, plain text, HTML, bytes, streams, redirects, files,
+  downloads, and server-sent events, all preserving status and size tracking;
 - blocking server start with `Run`, with conservative default timeouts;
 - context-aware graceful shutdown with `RunContext`;
 - `Serve`, `ServeTLS`, and `ServeListener` for a caller-owned `*http.Server`:
@@ -689,6 +690,93 @@ app.Group("/api", func(api *ossein.Router) {
 ```
 
 Middleware remains ordinary Go middleware.
+
+## Responses
+
+`Context` writes the common response shapes without dropping to the raw writer, and
+every one of them goes through the Ossein response writer, so status and size tracking,
+the access log, and the committed-response guard keep working:
+
+```go
+c.JSON(http.StatusOK, payload)
+c.Text(http.StatusOK, "pong")
+c.HTML(http.StatusOK, page)                    // escaping is html/template's job
+c.Blob(http.StatusOK, "text/csv", data)
+c.Stream(http.StatusOK, "text/csv", reader)    // nothing buffered
+c.NoContent(http.StatusNoContent)
+c.Redirect(http.StatusFound, target)
+```
+
+An unspecified content type becomes `application/octet-stream` rather than being left
+for `net/http` to sniff. Every helper refuses to write over a response that was already
+sent, which otherwise produces one status, one set of headers, and two bodies
+concatenated, with a "superfluous response.WriteHeader call" in the server log as the
+only symptom.
+
+`Redirect` accepts only a status that actually redirects — 301, 302, 303, 307, 308 — and
+rejects a location containing a line break. Go replaces line breaks in a header value
+with spaces rather than rejecting them, so response splitting becomes a `Location`
+pointing somewhere nobody wrote. It delegates to `http.Redirect`, so a GET receives the
+short HTML body that function writes, and a relative location resolves against the
+request path.
+
+Files delegate to `net/http`, so range and conditional requests work. A missing file, a
+directory, or an unreadable path comes back as an error instead: the handler can fall
+back, and the response stays in the application's error contract rather than the
+plain-text `404 page not found` that `ServeFile` would write into a JSON API.
+
+```go
+c.File("/var/lib/app/report.pdf")     // trusted path, never one from the request
+c.FileFS(assets, c.Param("name"))     // cannot escape the filesystem it is given
+c.Attachment(path, "Q3 report.csv")   // Content-Disposition, encoded safely
+```
+
+`FileFS` exists because a name taken from a request must not be able to walk out of the
+directory it is served from, and `Attachment` encodes the filename with
+`mime.FormatMediaType`, since a download name is frequently user data and a quote in it
+would otherwise end the header parameter early.
+
+### Server-sent events
+
+```go
+app.Get("/events", func(c *ossein.Context) error {
+    stream, err := c.EventStream()
+    if err != nil {
+        return err
+    }
+    defer stream.Close()
+
+    for {
+        if err := stream.Send(ossein.Event{Name: "stats", Data: payload}); err != nil {
+            return err // the client is gone
+        }
+        select {
+        case <-ticker.C:
+        case <-c.Context().Done():
+            return nil
+        }
+    }
+})
+```
+
+Headers are written and flushed when the stream opens, so the connection is live before
+the first event, and a writer that cannot flush is reported there rather than at the
+first `Send` — a stream that cannot flush delivers nothing until the handler returns,
+which for a stream is never.
+
+Multi-line data becomes multiple `data:` lines, which is what the client rejoins.
+Carriage returns are normalized first: a client ends a line on CR, LF, or CRLF, so a
+bare CR left inside data would end the line there and let the rest be read as new
+fields — an attacker-chosen event type and id. A line break in an ID, name, or comment
+is rejected for the same reason, and an event with no data is rejected because no client
+dispatches one. `Comment` writes a keepalive that clients ignore.
+
+A stream must not outlive its handler: `net/http` releases the response once the handler
+returns, so writing after that races the server recycling it. Handing the stream to a
+producer goroutine and writing late panics that goroutine, where no recovery middleware
+would see it — the write is recovered into an error and the stream closes itself, which
+makes the mistake reportable rather than fatal, but does not make it safe. Keep the
+stream inside its handler.
 
 ## Errors
 

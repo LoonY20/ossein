@@ -547,7 +547,7 @@ Every `default` tag in its configuration was equally unverified, because every t
 built `Config` as a struct literal and the config probe used a mirror type. It now loads
 the real `Config` through the framework.
 
-### 10. `Context` has only `JSON` and `NoContent`
+### 10. `Context` has only `JSON` and `NoContent` — RESOLVED
 
 Redirects, plain text, HTML, files, and SSE all require dropping to the raw
 writer. `linkr`'s redirect calls `http.Redirect` directly. Streaming *works*
@@ -555,6 +555,58 @@ writer. `linkr`'s redirect calls `http.Redirect` directly. Streaming *works*
 
 **Proposal.** `Redirect`, `Text`, `HTML`, `Blob`, `File`, and an SSE helper built
 on `ResponseController`, all of which must keep `ResponseWriter` tracking intact.
+
+**Resolution.** All of them, plus `Stream`, `FileFS`, and `Attachment`. `linkr`'s
+redirect and its `robots.txt` go through the helpers now, and `hooksink` streams queue
+statistics to an operator over SSE — the case `JSON` structurally cannot serve, since
+the response never ends and so cannot be built and returned.
+
+What writing them turned up is that most of the value is not the line saved but the
+mistake refused:
+
+- **A redirect with a non-3xx status silently does not redirect.** The Location header
+  is advisory outside a 3xx, so the client renders the body and nobody notices until a
+  user reports it.
+- **A line break in a location or an SSE field is injection.** Go replaces line breaks
+  in a header value with spaces rather than rejecting them, so the attack becomes a
+  Location pointing somewhere nobody wrote. Both are reported now.
+- **An unspecified content type invites sniffing**, which is how a text upload comes
+  back as HTML and executes. Every helper states a type.
+- **A download filename is user data.** `mime.FormatMediaType` is what keeps a quote in
+  it from ending the parameter early, and it percent-encodes rather than dropping
+  anything it cannot represent.
+- **A path from a request must not reach `http.ServeFile`.** `FileFS` exists next to
+  `File` for exactly that, and `File`'s doc says so rather than leaving it implied.
+- **A stream that cannot flush hangs.** Reporting it when the stream opens, rather than
+  at the first send, is the difference between an error and a handler that never
+  returns.
+
+**And five defects the review found in the first implementation**, three of them
+security-relevant:
+
+- **The SSE encoder was itself injectable.** It split on LF and trimmed a trailing CR,
+  but a client ends a line on CR too — so `Data` containing "hi\rid: 999\revent: admin"
+  arrived as a data line followed by a forged id and event type. The guards on `ID` and
+  `Name` existed precisely to prevent that, bypassed through the one field most likely to
+  hold untrusted content. Not one test in the file contained a carriage return.
+- **`Attachment` labelled error responses.** The header went on before the file lookup,
+  so a missing path produced a 404 whose `Content-Disposition` carried the download name
+  — user data — and a browser following it saved the error page under that name. `File`
+  compounded it by returning `nil` unconditionally, so the handler could not tell.
+- **`Redirect` accepted 304.** A range check let through the 3xx codes where Location
+  means something else; `http.Redirect` then wrote a body onto a 304, which must not
+  have one.
+- **Nothing refused to write over a committed response.** Two helpers in sequence
+  produced one status, one set of headers, and two concatenated bodies, with a
+  "superfluous response.WriteHeader call" log line as the only symptom.
+- **An event with a name but no data was accepted** and dispatched by nothing: clients
+  skip dispatch when the data buffer is empty.
+
+Four documents also stated that Go *drops* a header whose value contains a newline. It
+does not — it replaces the line breaks with spaces, which is worse, since the header
+survives with a mangled value. That claim was the stated justification for the check
+existing, and a test now verifies the actual behaviour rather than restating the
+belief.
 
 ## P3 — Sharp edges and correctness risks
 

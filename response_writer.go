@@ -1,6 +1,9 @@
 package ossein
 
-import "net/http"
+import (
+	"net/http"
+	"sync/atomic"
+)
 
 // ResponseWriter wraps http.ResponseWriter and records whether the response
 // has been committed, its status code, and the number of body bytes written.
@@ -9,10 +12,15 @@ import "net/http"
 // the recorded state is available anywhere through ResponseWriterFrom. Use
 // http.ResponseController for flushing, hijacking, and deadlines; it reaches
 // the underlying writer through Unwrap.
+//
+// The recorded state is stored atomically. A response is written by one goroutine at a
+// time, but it can be read by another: middleware.Timeout runs the handler on its own
+// goroutine and answers from the request goroutine, so a handler asking whether the
+// response is already committed is reading what the timeout just wrote.
 type ResponseWriter struct {
 	writer http.ResponseWriter
-	status int
-	bytes  int64
+	status atomic.Int64
+	bytes  atomic.Int64
 }
 
 // NewResponseWriter wraps w. An already wrapped writer is returned unchanged.
@@ -61,36 +69,32 @@ func (w *ResponseWriter) Header() http.Header {
 // WriteHeader records the first status code and delegates every call, so the
 // underlying writer keeps its own duplicate-call diagnostics.
 func (w *ResponseWriter) WriteHeader(status int) {
-	if w.status == 0 {
-		w.status = status
-	}
+	w.status.CompareAndSwap(0, int64(status))
 	w.writer.WriteHeader(status)
 }
 
 // Write commits the response with an implicit 200 when no status was written.
 func (w *ResponseWriter) Write(content []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
+	w.status.CompareAndSwap(0, http.StatusOK)
 	written, err := w.writer.Write(content)
-	w.bytes += int64(written)
+	w.bytes.Add(int64(written))
 	return written, err
 }
 
 // Written reports whether the response has been committed.
 func (w *ResponseWriter) Written() bool {
-	return w.status != 0
+	return w.status.Load() != 0
 }
 
 // Status returns the committed status code, or zero before the response is
 // committed.
 func (w *ResponseWriter) Status() int {
-	return w.status
+	return int(w.status.Load())
 }
 
 // BytesWritten returns the number of response body bytes written so far.
 func (w *ResponseWriter) BytesWritten() int64 {
-	return w.bytes
+	return w.bytes.Load()
 }
 
 // Unwrap returns the underlying writer for http.ResponseController.
