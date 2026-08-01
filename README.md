@@ -89,7 +89,8 @@ Today Ossein intentionally stays small:
 - ordered transactional seeders and `ossein db:seed`;
 - generic test factories with sequences, states, and persistence hooks;
 - composed application command handling for migrations and seeders;
-- backend-neutral cache contract, concurrency-safe in-memory driver, typed
+- backend-neutral cache contract, concurrency-safe in-memory driver with an
+  optional size bound and LRU eviction, a lifecycle-managed janitor, typed
   JSON/remember helpers, and atomic claims for idempotency keys and run-once work;
 - a bounded in-process job queue with a worker pool, per-name handlers, retries
   with backoff, load shedding through sentinel errors, and a drain on shutdown,
@@ -433,11 +434,43 @@ err := app.ServeListener(ctx, server, tls.NewListener(listener, tlsConfig))
 concurrency-safe in-memory driver and typed helpers:
 
 ```go
-store := cache.NewMemory()
+store := cache.NewMemory(cache.WithMaxEntries(10_000))
 
 user, err := cache.RememberJSON(ctx, store, "user:42", time.Minute,
     func(ctx context.Context) (User, error) { return users.Find(ctx, 42) })
 ```
+
+`cache.RegisterMemory(app, store)` binds it as a `Store` and reclaims expired
+entries on a schedule:
+
+```go
+if err := cache.RegisterMemory(app, store, cache.WithCleanupInterval(time.Minute)); err != nil {
+    return err
+}
+```
+
+The schedule matters because reclamation is otherwise driven by traffic: every read
+and write cleans a small sample, so a process that goes quiet after a burst holds
+every expired entry until its next write. With day-long idempotency keys that is a
+day of memory nothing will ask for again.
+
+`WithMaxEntries` is the other half. Without a bound the driver does not leak, but
+resident memory is TTL times arrival rate, which is not a number anyone chose. With
+one, a write that would exceed the cap evicts the least recently used key. Eviction
+goes by age of use, not by expiry: every write cleans a sample first, so dead entries
+are usually gone before it runs, but a live key can still be discarded while dead ones
+remain elsewhere. Discarding live data is what makes it a bound.
+
+A bound and a claim do not mix. `Claim` and `Once` need a key to stay present for its
+lease, and eviction does not know a key is a claim — dropping one early lets the work
+it guards run a second time. Leave a store holding idempotency keys unbounded, with the
+janitor to reclaim expired ones, and keep a bounded store for data that is merely
+expensive to recompute.
+
+A bound changes how reads are tracked: unbounded, a read takes a shared lock and the
+ordering list is only a cleanup cursor; bounded, a read has to record that it
+happened, or eviction cannot tell hot keys from cold ones, so it takes the exclusive
+lock. That cost is why the bound is opt-in rather than a default.
 
 Doing something at most once needs more than `Get` and `Set`:
 

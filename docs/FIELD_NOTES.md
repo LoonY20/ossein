@@ -722,10 +722,10 @@ Two more things the review turned up, both of which the tests said were covered:
   to a nanosecond, passed both suites — the second being precisely the failure the claim
   exists to prevent, since a retry a millisecond later would be accepted as new work.
 
-### 13. The memory cache has no bound on resident size
+### 13. The memory cache has no bound on resident size — RESOLVED
 
 Write-only keys *are* reclaimed: `Set` calls `purgeSampleLocked` on every write
-(`cache/memory.go:104`), which walks up to 16 entries from the front of a
+(`cache/memory.go`), which walks up to 16 entries from the front of a
 round-robin order list, dropping expired ones and rotating live ones to the back.
 So the driver does not leak — an earlier draft of this note claimed it did, and
 that was wrong.
@@ -742,6 +742,49 @@ substantive fix; it is what turns "does not leak" into "cannot exceed a
 configured budget". An opt-in lifecycle janitor
 (`cache.RegisterMemory(app, …)`) additionally covers the idle-after-burst case
 without every application writing its own ticker.
+
+**Resolution.** Both. `WithMaxEntries` caps the driver with least-recently-used
+eviction, and `RegisterMemory` binds the store and runs the janitor; `hooksink`'s
+hand-written ticker and `linkr`'s hand-written binding are both gone.
+
+The eviction policy forced a decision the note glossed over. The ordering list the
+driver already had is a *cleanup cursor*, not an access order: sampling rotates live
+entries to the back, which under LRU semantics would mark a cold entry as hot and let
+cleanup decide what survives eviction. So a bound needs the list to mean something
+different — and recording a read means taking the exclusive lock, where an unbounded
+read takes a shared one.
+
+Rather than pay that everywhere or ship an eviction order that is not really LRU, the
+read lock differs by mode: unbounded keeps the shared read, bounded promotes on read.
+The cost is stated where the bound is configured rather than buried.
+
+**And the defect the review found in the first implementation**, which inverted the
+feature: the bounded mode could not rotate entries during cleanup, so its sample
+re-walked the same front entries forever and reclaimed nothing behind them. Turning on
+the memory bound made reclamation strictly *worse* than leaving it off, and the doc
+comment asserted the opposite — that expired entries collect at the cold end, which they
+do not, since an entry expires where it was last used.
+
+The fix is a cleanup cursor that advances on its own, so neither mode reorders anything
+and both get the same coverage. Nothing had distinguished the two strategies: mutations
+making cleanup always rotate, and always scan, both passed.
+
+Two more claims that were false rather than merely untested:
+
+- **"Expired entries go before live ones."** A write samples sixteen keys, not all of
+  them, so past the sample window eviction takes a live key while dead ones remain. The
+  test that "covered" this used four entries — entirely inside one sample — so it could
+  only pass. The claim is gone from the code, the README, and the changelog.
+- **A bounded store silently breaks `Claim` and `Once`.** Eviction does not know a key is
+  a claim, so dropping one lets the work it guards run twice. The dogfood receiver had
+  its idempotency cache bounded to 64 entries, and its test sent 500 deliveries, asserted
+  the cache stayed under 64, and called dropping 436 idempotency keys a pass. That store
+  is unbounded again, with the janitor doing the reclaiming, and the incompatibility is
+  documented where the bound is configured.
+
+Also fixed: `RegisterMemory`'s stop hook waited for a goroutine that a failed or absent
+`Start` never launched, so shutdown blocked forever — and `App.Stop` attempts every hook,
+so one blocked hook takes the rest with it.
 
 ### 14. Background work cannot inherit request identity
 

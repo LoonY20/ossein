@@ -125,6 +125,21 @@ Ossein uses semantic versioning for published releases.
   than falling back to the racy form, because a guarantee that quietly is not one produces
   a failure that looks like an application bug. A claim is a lease, so its TTL must be
   positive: one that never expires is a tombstone that only an explicit delete can lift
+- `cache.WithMaxEntries` caps how much the in-memory driver holds, evicting the least
+  recently used key when a write would exceed the cap. Without it the driver does not
+  leak — every read and write reclaims a sample — but resident memory is TTL times
+  arrival rate, which is not a budget anyone chose. Eviction goes by age of use rather
+  than by expiry: a write cleans a sample first, so dead entries are usually gone before
+  it runs, but a live key can still be discarded while dead ones remain. A bound changes
+  reads from a shared to an exclusive lock, because eviction cannot tell hot keys from
+  cold ones unless a read records that it happened, which is why it is opt-in — and it
+  must not be used for a store holding claims, since evicting one lets the work it
+  guards run twice
+- `cache.RegisterMemory` binds an in-memory cache as a `Store` and reclaims its expired
+  entries on a schedule, stopping the janitor during shutdown and waiting for it. Without
+  a schedule, reclamation is driven by traffic, so a process that goes quiet after a burst
+  holds every expired entry until its next write — a day of dead idempotency keys, and a
+  ticker every application was writing by hand
 - `cache.Once` runs work at most once per key and releases the claim if the work fails.
   Claiming before the work and keeping the claim when the work did not happen turns "this
   might run twice" into "this can never run again" — a webhook receiver that sheds a
@@ -223,6 +238,10 @@ Ossein uses semantic versioning for published releases.
 
 ### Changed
 
+- a service constructor's variadic parameter is treated as options rather than as a
+  dependency, so a constructor gaining one keeps working in the container. Without
+  that, adding an option parameter to an existing constructor turns every
+  registration of it into "service []Option is not registered" at startup
 - `Run` and `RunContext` now delegate to `Serve` and build their server with a
   10s `ReadHeaderTimeout` and a 120s `IdleTimeout`, so an unattended server can
   no longer be held open indefinitely by connections that never complete a

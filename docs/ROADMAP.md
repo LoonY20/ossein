@@ -157,14 +157,15 @@ Goal: make Ossein useful for real backend services.
 - [x] cache contract
 - [x] in-memory cache driver
 - [x] memory cache driver amortized expiration sweeping
-- [ ] memory cache driver configurable size bounds and eviction policy
+- [x] memory cache driver configurable size bounds and eviction policy
+      (`cache.WithMaxEntries`, least-recently-used)
 - [x] documented cache semantics for undecodable entries and backend
       write failures
 - [x] optional atomic cache capability interfaces — `cache.Adder`, `cache.Claim`,
       and `cache.Once`, for idempotency keys, run-once jobs, and leases
-- [ ] lifecycle-managed cleanup for the memory driver: sampled reclamation is
-      driven by traffic, so a process idle after a burst holds expired entries
-      until its next write
+- [x] lifecycle-managed cleanup for the memory driver (`cache.RegisterMemory`),
+      since sampled reclamation is driven by traffic and a process idle after a
+      burst would otherwise hold expired entries until its next write
 - [ ] distributed cache driver
 - [x] queues and workers with lifecycle-managed graceful shutdown
       (`queue.Memory`, `queue.Register`), behind an `Enqueuer` interface so a
