@@ -3,6 +3,7 @@ package apitest_test
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -213,7 +214,7 @@ func TestPostFormAndPostRaw(t *testing.T) {
 	var form formRequest
 	// Two fields, so the separator between them is exercised, and a value needing
 	// escaping so the encoding is.
-	client.PostForm("/form", map[string]string{"name": "a b&c", "other": "x=y"}).
+	client.PostForm("/form", url.Values{"name": {"a b&c"}, "other": {"x=y"}}).
 		AssertStatus(http.StatusOK).
 		DecodeJSON(&form)
 	if form.Name != "a b&c" {
@@ -328,24 +329,15 @@ func TestAssertionsFailWithTheRequestAndBody(t *testing.T) {
 	}
 }
 
-// TestDecodeJSONRejectsUnknownFields keeps a test from passing against a struct
-// that has drifted from the response, which would otherwise read zero values and
-// assert nothing.
-func TestDecodeJSONRejectsUnknownFields(t *testing.T) {
-	type stale struct {
+// TestDecodeJSONReportsABodyItCannotRead covers the failure that matters for the
+// lenient decoder: a body that is not JSON at all.
+func TestDecodeJSONReportsABodyItCannotRead(t *testing.T) {
+	type target struct {
 		Missing string `json:"missing"`
 	}
 
 	message := mustFail(t, func(tb testing.TB) {
-		var target stale
-		apitest.New(tb, testApp(t)).Get("/ok").DecodeJSON(&target)
-	})
-	if !strings.Contains(message, "unknown field") {
-		t.Fatalf("an unknown field was accepted: %s", message)
-	}
-
-	message = mustFail(t, func(tb testing.TB) {
-		apitest.New(tb, testApp(t)).Get("/text").DecodeJSON(&stale{})
+		apitest.New(tb, testApp(t)).Get("/text").DecodeJSON(&target{})
 	})
 	if !strings.Contains(message, "decode body") {
 		t.Fatalf("a non-JSON body decoded without complaint: %s", message)

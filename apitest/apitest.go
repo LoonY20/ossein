@@ -31,6 +31,9 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
+	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -54,11 +57,33 @@ type Client struct {
 // The handler is usually an *ossein.App, which is an http.Handler; anything else
 // that serves HTTP works too, so middleware can be tested in isolation.
 func New(t testing.TB, handler http.Handler) *Client {
+	if t == nil {
+		panic("apitest: t cannot be nil")
+	}
 	t.Helper()
 	if handler == nil {
 		t.Fatal("apitest: handler cannot be nil")
 	}
 	return &Client{t: t, handler: handler, headers: http.Header{}}
+}
+
+// WithT returns a client that reports failures through t.
+//
+// A client holds the test it was built with, and a testing.TB's FailNow ends the
+// goroutine it is called on. Using a parent's client inside t.Run therefore files
+// the failure under the parent, skips the remaining subtests, and under
+// t.Parallel takes the process down. Deriving a client at the top of each subtest
+// is what avoids that:
+//
+//	base := apitest.New(t, app)
+//	t.Run("missing", func(t *testing.T) {
+//		base.WithT(t).Get("/x").AssertStatus(404)
+//	})
+func (c *Client) WithT(t testing.TB) *Client {
+	if t == nil {
+		c.t.Fatal("apitest: t cannot be nil")
+	}
+	return &Client{t: t, handler: c.handler, headers: c.headers}
 }
 
 // WithHeader returns a client that sends header on every request.
@@ -105,25 +130,13 @@ func (c *Client) PatchJSON(path string, payload any) *Response {
 }
 
 // PostForm sends a form-encoded POST request.
-func (c *Client) PostForm(path string, values map[string]string) *Response {
+//
+// url.Values rather than a map, so a repeated field — a checkbox group, a
+// multi-select — can be sent at all, and so the encoding is the standard
+// library's rather than a second implementation of it.
+func (c *Client) PostForm(path string, values url.Values) *Response {
 	c.t.Helper()
-
-	// Sorted, so a body an assertion looks at is the same on every run.
-	names := make([]string, 0, len(values))
-	for name := range values {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	var body strings.Builder
-	for i, name := range names {
-		if i > 0 {
-			body.WriteByte('&')
-		}
-		body.WriteString(urlEncode(name) + "=" + urlEncode(values[name]))
-	}
-
-	return c.send(http.MethodPost, path, strings.NewReader(body.String()),
+	return c.send(http.MethodPost, path, strings.NewReader(values.Encode()),
 		"application/x-www-form-urlencoded")
 }
 
@@ -144,17 +157,26 @@ func (c *Client) Do(request *http.Request) *Response {
 		c.t.Fatal("apitest: request cannot be nil")
 	}
 
+	// Cloned, because writing defaults into the caller's request leaks them into
+	// whatever it is used for next — an unauthenticated client re-sending a request
+	// an authenticated one had touched would carry the key.
+	sent := request.Clone(request.Context())
+	sent.Header = request.Header.Clone()
+	if sent.Header == nil {
+		sent.Header = http.Header{}
+	}
 	for name, values := range c.headers {
-		if request.Header.Get(name) == "" {
-			for _, value := range values {
-				request.Header.Add(name, value)
-			}
+		// Presence, not emptiness: a header the caller deliberately set to "" is a
+		// value, and appending to it produces something no client would send.
+		if _, set := sent.Header[textproto.CanonicalMIMEHeaderKey(name)]; set {
+			continue
 		}
+		sent.Header[textproto.CanonicalMIMEHeaderKey(name)] = append([]string(nil), values...)
 	}
 
 	recorder := httptest.NewRecorder()
-	c.handler.ServeHTTP(recorder, request)
-	return &Response{t: c.t, request: request, recorded: recorder.Result()}
+	c.handler.ServeHTTP(recorder, sent)
+	return &Response{t: c.t, request: sent, recorded: recorder.Result()}
 }
 
 func (c *Client) sendJSON(method, path string, payload any) *Response {
@@ -170,17 +192,37 @@ func (c *Client) sendJSON(method, path string, payload any) *Response {
 func (c *Client) send(method, path string, body io.Reader, contentType string) *Response {
 	c.t.Helper()
 
-	request := httptest.NewRequest(method, path, body)
+	request := c.newRequest(method, path, body)
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
 	return c.Do(request)
 }
 
+// newRequest builds a request, reporting a target the standard library rejects
+// rather than letting it panic.
+//
+// httptest.NewRequest panics on a path with no leading slash, which is the most
+// likely typo in a test, and a panic takes the whole test binary with it instead
+// of naming the test that made the mistake.
+func (c *Client) newRequest(method, path string, body io.Reader) (request *http.Request) {
+	c.t.Helper()
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.t.Fatalf("apitest: %s %q is not a usable request target: %v",
+				method, path, recovered)
+		}
+	}()
+
+	return httptest.NewRequest(method, path, body)
+}
+
 // Response is a recorded response, with assertions that fail the test.
 //
-// Every assertion returns the response, so they chain, and every one reports the
-// status and body when it fails — the two things needed to understand why.
+// Every assertion returns the response, so they chain, and every one names the
+// request and prints the body when it fails — the two things needed to understand
+// why without adding a print statement.
 type Response struct {
 	t        testing.TB
 	request  *http.Request
@@ -189,10 +231,19 @@ type Response struct {
 	bodyRead bool
 }
 
-// Result returns the underlying *http.Response, for anything the assertions here
-// do not cover.
+// Result returns the response, for anything the assertions here do not cover.
+//
+// Its Body is a fresh reader over the recorded bytes, so it can be read whether or
+// not an assertion has already read them, and again afterwards. Returning the
+// recorded response directly would hand out a one-shot reader that any earlier
+// assertion had already drained.
 func (r *Response) Result() *http.Response {
-	return r.recorded
+	r.t.Helper()
+
+	body := r.Body()
+	result := *r.recorded
+	result.Body = io.NopCloser(bytes.NewReader(body))
+	return &result
 }
 
 // Status returns the response status code.
@@ -233,12 +284,16 @@ func (r *Response) AssertStatus(status int) *Response {
 }
 
 // AssertHeader fails unless the named response header has the given value.
-func (r *Response) AssertHeader(name, value string) *Response {
+//
+// A header sent more than once is compared as all of its values, so asserting on
+// one of two Set-Cookie headers is possible and a second value cannot go unseen.
+func (r *Response) AssertHeader(name string, values ...string) *Response {
 	r.t.Helper()
 
-	if got := r.recorded.Header.Get(name); got != value {
-		r.t.Fatalf("apitest: %s header %s = %q, want %q",
-			r.describe(), name, got, value)
+	got := r.recorded.Header.Values(name)
+	if !slices.Equal(got, values) {
+		r.t.Fatalf("apitest: %s header %s = %q, want %q\nbody: %s",
+			r.describe(), name, got, values, r.Body())
 	}
 	return r
 }
@@ -258,9 +313,26 @@ func (r *Response) AssertBodyContains(text string) *Response {
 
 // DecodeJSON decodes the body into target.
 //
-// Unknown fields are rejected, so a test decoding into a struct that has drifted
-// from the response fails rather than quietly reading zero values.
+// Fields target does not declare are ignored, because reading part of a response
+// is the normal thing to want: a test that cares about one field should not have
+// to mirror the whole document, and a field added to a response is not a
+// regression. DecodeJSONStrict is for when it is.
 func (r *Response) DecodeJSON(target any) *Response {
+	r.t.Helper()
+	return r.decode(target, false)
+}
+
+// DecodeJSONStrict decodes the body into target and rejects any field target does
+// not declare.
+//
+// Use it when the response type is the contract — an API whose shape is promised
+// to clients — and a field appearing is a change someone should have to notice.
+func (r *Response) DecodeJSONStrict(target any) *Response {
+	r.t.Helper()
+	return r.decode(target, true)
+}
+
+func (r *Response) decode(target any, strict bool) *Response {
 	r.t.Helper()
 
 	if target == nil {
@@ -268,9 +340,19 @@ func (r *Response) DecodeJSON(target any) *Response {
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(r.Body()))
-	decoder.DisallowUnknownFields()
+	if strict {
+		decoder.DisallowUnknownFields()
+	}
 	if err := decoder.Decode(target); err != nil {
 		r.t.Fatalf("apitest: %s decode body: %v\nbody: %s", r.describe(), err, r.Body())
+	}
+
+	// A second value means the body is not the single document it was read as,
+	// which json.Decoder would otherwise pass over in silence.
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err == nil {
+		r.t.Fatalf("apitest: %s body contains more than one JSON value\nbody: %s",
+			r.describe(), r.Body())
 	}
 	return r
 }
@@ -298,6 +380,10 @@ func (r *Response) AssertError(status int, code string) *Response {
 func (r *Response) AssertFieldError(field, text string) *Response {
 	r.t.Helper()
 
+	// The status is asserted here rather than left to a preceding AssertError,
+	// because used on its own this otherwise passes against a 200 whose body
+	// happens to carry a validation document.
+	r.AssertStatus(http.StatusUnprocessableEntity)
 	envelope := r.envelope()
 	messages, ok := envelope.Error.Fields[field]
 	if !ok {
@@ -318,8 +404,8 @@ func (r *Response) AssertFieldError(field, text string) *Response {
 			return r
 		}
 	}
-	r.t.Fatalf("apitest: %s errors for %q are %q, none containing %q",
-		r.describe(), field, messages, text)
+	r.t.Fatalf("apitest: %s errors for %q are %q, none containing %q\nbody: %s",
+		r.describe(), field, messages, text, r.Body())
 	return r
 }
 
@@ -327,14 +413,21 @@ func (r *Response) AssertFieldError(field, text string) *Response {
 func (r *Response) envelope() ossein.ErrorEnvelope {
 	r.t.Helper()
 
-	var envelope ossein.ErrorEnvelope
-	if err := json.Unmarshal(r.Body(), &envelope); err != nil {
-		r.t.Fatalf("apitest: %s body is not an error document: %v\nbody: %s",
-			r.describe(), err, r.Body())
+	// Probed before decoding: treating an empty code as "not an error document"
+	// misreports a real envelope whose code is empty, and leaves no way to assert
+	// "some framework error, whatever its code".
+	var probe struct {
+		Error *json.RawMessage `json:"error"`
 	}
-	if envelope.Error.Code == "" {
+	if err := json.Unmarshal(r.Body(), &probe); err != nil || probe.Error == nil {
 		r.t.Fatalf("apitest: %s body is not an error document\nbody: %s",
 			r.describe(), r.Body())
+	}
+
+	var envelope ossein.ErrorEnvelope
+	if err := json.Unmarshal(r.Body(), &envelope); err != nil {
+		r.t.Fatalf("apitest: %s error document does not decode: %v\nbody: %s",
+			r.describe(), err, r.Body())
 	}
 	return envelope
 }
@@ -342,23 +435,4 @@ func (r *Response) envelope() ossein.ErrorEnvelope {
 // describe names the request, so a failure says which one it was.
 func (r *Response) describe() string {
 	return fmt.Sprintf("%s %s", r.request.Method, r.request.URL.RequestURI())
-}
-
-// urlEncode percent-encodes a form value. net/url would do this, but importing it
-// for two lines pulls a parser into a file that only builds a string.
-func urlEncode(value string) string {
-	var encoded strings.Builder
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		switch {
-		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9',
-			c == '-', c == '_', c == '.', c == '~':
-			encoded.WriteByte(c)
-		case c == ' ':
-			encoded.WriteByte('+')
-		default:
-			fmt.Fprintf(&encoded, "%%%02X", c)
-		}
-	}
-	return encoded.String()
 }

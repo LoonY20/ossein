@@ -966,15 +966,37 @@ else — and cannot say which field failed. `AssertError` and `AssertFieldError`
 the document the error handler renders, so converting those tests made two of them
 strictly stronger rather than merely shorter.
 
-Two smaller decisions worth recording:
+One smaller decision worth recording: failures print the request and the body. "got
+500, want 200" sends someone to add a print statement; naming the request and showing
+what came back is the difference between a red test that explains itself and one that
+starts an investigation.
 
-- **`DecodeJSON` rejects unknown fields.** A test decoding into a struct that has
-  drifted from the response otherwise reads zero values and asserts nothing, which is
-  the same failure mode as a vacuous test — and this project has produced enough of
-  those to be worth defending against structurally.
-- **Failures print the request and the body.** "got 500, want 200" sends someone to add
-  a print statement; naming the request and showing what came back is the difference
-  between a red test that explains itself and one that starts an investigation.
+**And what the review found in the first implementation**, three of which were worse
+than the boilerplate they replaced:
+
+- **A client held across a `t.Run` boundary broke the suite.** The client keeps its
+  `testing.TB`, and `FailNow` ends the goroutine it is called on — so a failure inside a
+  subtest was filed under the parent, *the remaining subtests never ran*, and under
+  `t.Parallel` the process died. The pattern every doc demonstrated was the broken one.
+  `WithT` derives a client for a subtest.
+- **`Result` handed out a body the assertions had already drained**, so mixing the two
+  read nothing — in either order, silently, including in the failure messages that print
+  the body. Both halves of "nothing is hidden" were false.
+- **A path without a leading slash panicked the test binary** rather than failing a test,
+  which is the most likely typo there is.
+- **`Do` wrote the client's headers into the caller's request**, so an unauthenticated
+  client re-sending it carried the API key — the exact "passes for the wrong reason" the
+  helper claims to prevent.
+- **Strict decoding was the wrong default.** It rejects a target that declares one field
+  of a two-field response, which is the ordinary case, and it does nothing at three of
+  the four real call sites, where the test decodes into the application's own response
+  type and a renamed tag moves both together. It is opt-in now.
+
+Two claims in the code were also false: `AssertHeader` and `AssertFieldError` did not
+print the body they promised to, and the justification for hand-rolling percent-encoding
+("importing net/url pulls in a parser") was wrong — `net/http` already imports it. That
+code is gone, and `PostForm` takes `url.Values`, which can express a repeated field at
+all.
 
 The package's own tests use a `testing.TB` that records instead of failing, so every
 assertion is checked in both directions: that it fails when it should, with a message

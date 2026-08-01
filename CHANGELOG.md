@@ -130,10 +130,15 @@ Ossein uses semantic versioning for published releases.
   response with chaining assertions that print the request and body when they fail.
   `AssertError` and `AssertFieldError` read the framework's rendered error envelope
   rather than matching substrings, so a body that mentions a code somewhere does not
-  pass and a validation failure is checked by field. `DecodeJSON` rejects unknown
-  fields, so a struct that has drifted from the response fails instead of reading zero
-  values. `Response.Result`, `Response.Body`, and `Client.Do` keep the standard types
-  reachable
+  pass and a validation failure is checked by field, and the status is asserted with it.
+  `DecodeJSON` ignores fields the target does not declare, since reading part of a
+  response is the ordinary thing to want; `DecodeJSONStrict` is for a response whose
+  shape is the contract, and both reject a body carrying more than one JSON document.
+  `WithT` derives a client for a subtest, because a `testing.TB`'s `FailNow` ends the
+  goroutine it is called on and a parent's client used inside `t.Run` would file the
+  failure against the parent and skip the rest. `Do` clones the request rather than
+  writing the client's headers into it. `Response.Result`, `Response.Body`, and
+  `Client.Do` keep the standard types reachable
 - `App.WiringFingerprint` and a `Fingerprint` constant in generated wiring, so a
   stale generated file fails a test instead of silently describing an older graph.
   Add a service, forget to re-run the generator, and nothing said so. The fingerprint
