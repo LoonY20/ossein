@@ -125,6 +125,15 @@ Ossein uses semantic versioning for published releases.
   than falling back to the racy form, because a guarantee that quietly is not one produces
   a failure that looks like an application bug. A claim is a lease, so its TTL must be
   positive: one that never expires is a tombstone that only an explicit delete can lift
+- an `apitest` package for driving an application from a test: a client with
+  `Get`/`PostJSON`/`PostForm`/`PostRaw`/`Do` and per-client default headers, and a
+  response with chaining assertions that print the request and body when they fail.
+  `AssertError` and `AssertFieldError` read the framework's rendered error envelope
+  rather than matching substrings, so a body that mentions a code somewhere does not
+  pass and a validation failure is checked by field. `DecodeJSON` rejects unknown
+  fields, so a struct that has drifted from the response fails instead of reading zero
+  values. `Response.Result`, `Response.Body`, and `Client.Do` keep the standard types
+  reachable
 - `App.WiringFingerprint` and a `Fingerprint` constant in generated wiring, so a
   stale generated file fails a test instead of silently describing an older graph.
   Add a service, forget to re-run the generator, and nothing said so. The fingerprint

@@ -110,6 +110,8 @@ Today Ossein intentionally stays small:
   migration commands;
 - controller, middleware, and request generators;
 - a minimal application starter with a health endpoint and test;
+- an `apitest` client for driving an application from a test, with assertions
+  that read the framework's error envelope rather than matching substrings;
 - race-tested core and CLI with an enforced 85% coverage floor;
 - no third-party runtime dependencies.
 
@@ -1126,6 +1128,40 @@ if err := query.Err(); err != nil {
 Only the query string is read, so a form body never satisfies a query field, and
 a malformed query string is reported as a `400` rather than binding as silently
 missing fields.
+
+## Testing an application
+
+`apitest` drives an application the way a test wants to, without each project
+rewriting the same request building and JSON decoding:
+
+```go
+client := apitest.New(t, app).WithHeader("X-API-Key", key)
+
+var link Link
+client.PostJSON("/api/links", CreateLinkRequest{Target: target}).
+    AssertStatus(http.StatusCreated).
+    DecodeJSON(&link)
+
+client.Get("/api/links/missing").AssertError(http.StatusNotFound, "link_not_found")
+
+client.PostJSON("/api/links", CreateLinkRequest{}).
+    AssertError(http.StatusUnprocessableEntity, "validation_failed").
+    AssertFieldError("target", "required")
+```
+
+`AssertError` and `AssertFieldError` read the error document the framework renders,
+which is the part a general HTTP testing library cannot do: a body that merely
+mentions a code somewhere does not pass, and a validation failure is checked by field
+rather than by substring.
+
+Assertions chain and every failure names the request and prints the body, so a red
+test says what happened rather than sending someone to add a print statement.
+`DecodeJSON` rejects unknown fields, so a test decoding into a struct that has drifted
+from the response fails instead of quietly reading zero values.
+
+Nothing is hidden: `Response.Result` returns the `*http.Response`, `Response.Body` the
+bytes, and `Client.Do` takes a request built however the test likes — which is how a
+signed webhook or a deliberately malformed document gets sent.
 
 ## Standard Go escape hatch
 

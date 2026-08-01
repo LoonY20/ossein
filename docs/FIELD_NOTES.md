@@ -950,11 +950,35 @@ not move it either, which a naive hash over map iteration would have got wrong.
 
 The package-main constraint is documented as a prerequisite rather than discovered.
 
-### 17. No test client or response assertions
+### 17. No test client or response assertions — RESOLVED
 
 Both services hand-rolled the same request helper and JSON decoding. This is
 Phase 6 on the roadmap; the note is only that it was the first thing missed in
 both projects.
+
+**Resolution.** The `apitest` package.
+
+Writing it turned up the part that justifies it being in the framework rather than
+being a general HTTP testing library: the assertions that read the *error envelope*.
+Both applications checked errors with `strings.Contains(body, "validation_failed")`,
+which passes if the code appears anywhere — including inside a message about something
+else — and cannot say which field failed. `AssertError` and `AssertFieldError` decode
+the document the error handler renders, so converting those tests made two of them
+strictly stronger rather than merely shorter.
+
+Two smaller decisions worth recording:
+
+- **`DecodeJSON` rejects unknown fields.** A test decoding into a struct that has
+  drifted from the response otherwise reads zero values and asserts nothing, which is
+  the same failure mode as a vacuous test — and this project has produced enough of
+  those to be worth defending against structurally.
+- **Failures print the request and the body.** "got 500, want 200" sends someone to add
+  a print statement; naming the request and showing what came back is the difference
+  between a red test that explains itself and one that starts an investigation.
+
+The package's own tests use a `testing.TB` that records instead of failing, so every
+assertion is checked in both directions: that it fails when it should, with a message
+containing what a reader needs, and that it stays quiet when it should not.
 
 ## Suggested roadmap changes
 

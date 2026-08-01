@@ -213,8 +213,9 @@ platform is a non-goal (see below).
 
 ## Phase 6 — Observability and API Tooling
 
-- [ ] testing utilities and HTTP test client with response assertions — the
-      first thing hand-rolled in both applications built on 0.2.0
+- [x] HTTP test client with response assertions (`apitest`), including assertions
+      over the framework's error envelope — the first thing hand-rolled in both
+      applications built on 0.2.0
 - [ ] OpenAPI generation
 - [ ] metrics
 - [ ] OpenTelemetry integration
