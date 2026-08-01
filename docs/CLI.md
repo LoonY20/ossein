@@ -84,6 +84,42 @@ if err != nil {
 services.UserService.Handle(...)
 ```
 
+### Package layout
+
+Generated code is imported, so it cannot reference `package main` — which makes the
+layout a prerequisite rather than something to discover from an error. A service
+whose constructors all live in its `main` package has to move them into an
+importable package before `wire` can generate anything:
+
+```
+cmd/server/main.go        // registration and startup
+internal/app/services.go  // exported constructors: NewUserService, NewUserRepository
+internal/wiring/          // generated
+```
+
+`ossein new` lays a project out this way already.
+
+### Keeping the file current
+
+Generated wiring is checked in, so it can go stale: add a service, forget to
+regenerate, and the file describes an older graph with nothing to say so. The
+generated file carries a `//go:generate ossein wire` directive, so `go generate ./...`
+refreshes it, and a `Fingerprint` constant identifying the graph it came from:
+
+```go
+func TestWiringIsCurrent(t *testing.T) {
+	if app.WiringFingerprint() != wiring.Fingerprint {
+		t.Fatal("service graph changed; run `go generate ./...`")
+	}
+}
+```
+
+The fingerprint covers which types are registered, what builds each one, what each
+needs, and how long each lives. Renaming a variable inside a constructor does not
+move it; adding a parameter to one does. Comparing the generated *source* instead
+would fail for a reformatting or a reworded comment, which is not what anyone wants
+a CI check to catch.
+
 Rules the generator enforces instead of guessing:
 
 - singleton services become `Services` fields; transient services become

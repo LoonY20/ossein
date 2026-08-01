@@ -906,7 +906,7 @@ The test that claimed to keep a new class from rendering as "unknown" iterated a
 hand-written map, so it could only check the classes someone remembered to add to it. It
 walks the enum now.
 
-### 16. `ossein wire` cannot detect its own staleness
+### 16. `ossein wire` cannot detect its own staleness — RESOLVED
 
 The generated output is good, but nothing keeps it honest. There is no
 `//go:generate` directive, no CI staleness check, and no runtime assertion that
@@ -925,6 +925,30 @@ Cosmetic: an `*sql.DB` instance registration yields the parameter name `dB`.
 `wiring_gen_test.go` that regenerates and compares, so CI fails on drift.
 Document the package layout `wire` requires. Improve acronym handling in
 parameter names.
+
+**Resolution.** The directive, a fingerprint, and the acronym fix.
+
+The proposal's staleness check — regenerate and compare the whole file — is the
+obvious design and the wrong one. Comparing source makes the test fail for anything
+that changes formatting: a Go release that reformats, an import alias moving, a
+comment reworded in the generator. A fingerprint over the graph itself fails only when
+the graph changes, which is the thing that actually matters, and it reduces the check
+an application has to write to four lines:
+
+```go
+func TestWiringIsCurrent(t *testing.T) {
+	if app.WiringFingerprint() != wiring.Fingerprint {
+		t.Fatal("service graph changed; run `go generate ./...`")
+	}
+}
+```
+
+It covers what the generated code depends on: which types are registered, what builds
+each one, what each needs, and how long each lives. Renaming a variable inside a
+constructor does not move it; adding a parameter to one does. Registration order does
+not move it either, which a naive hash over map iteration would have got wrong.
+
+The package-main constraint is documented as a prerequisite rather than discovered.
 
 ### 17. No test client or response assertions
 
