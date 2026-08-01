@@ -831,7 +831,7 @@ The ID lives on the `Job` rather than only in the worker's context, so a durable
 keeps the connection across a restart — the case where correlating by timestamp is
 hardest and matters most.
 
-### 15. No driver-neutral SQL error classification
+### 15. No driver-neutral SQL error classification — RESOLVED
 
 Detecting a unique-violation on a custom short code means string-matching the
 driver's message in application code:
@@ -847,6 +847,64 @@ which the `database` package otherwise makes a config change.
 `IsSerializationFailure(err)`, implemented per dialect without importing any
 driver (SQLSTATE and vendor codes are reachable through small interface
 assertions).
+
+**Resolution.** `database.Classify` and five predicates. `linkr`'s
+`strings.Contains(err.Error(), "UNIQUE constraint failed")` is gone.
+
+**The parenthetical in that proposal was half wrong.** SQLSTATE is reachable through
+an interface assertion — PostgreSQL drivers expose `SQLState() string` — and so are
+SQLite extended codes on the pure-Go driver, which exposes `Code() int`. But
+`go-sql-driver/mysql` and `mattn/go-sqlite3` keep their codes in *struct fields* with
+no accessor, so no interface assertion reaches them, and reflection is not available
+here: it is confined to the container and typed config. Those two are recognised by
+matching their message, which is the thing this note set out to eliminate.
+
+Doing it once in the framework is still worth it — every application matching the same
+strings, worse, is the alternative — but the honest framing is that the mechanism
+varies by driver rather than being uniform. So the ordering is explicit: a structured
+code always wins over text, the fallback is documented as the fragile part, and
+`NewClassifier` takes recognizers that run first, because this package cannot import a
+driver and should not have to ship a release before an application can correct it.
+
+One more thing the proposal missed: MySQL reports *every* integrity constraint as
+SQLSTATE 23000, so reading SQLSTATE alone would report a broken foreign key as a
+duplicate key. That value is deliberately left unrecognised.
+
+**And the defects the review found in the first implementation**, the first of which
+made the central claim false:
+
+- **Text anywhere in the chain beat a code below it.** Every recognizer ran against the
+  outermost error before anything unwrapped — and a wrapper's message contains the text
+  of everything it wraps. So a repository wrapping a `40001` with context that happened
+  to match turned a serialization failure into a unique violation, and `IsRetryable`
+  then said not to retry a transaction the database was asking for. The nesting is
+  inverted now: each mechanism runs across the whole chain before the next is tried.
+  Nothing had distinguished the two orderings; the test named for it used a single
+  unwrapped error, so it only ever exercised the recognizer list.
+- **`Code() int` was treated as evidence of SQLite.** It is not: `godror`'s Oracle
+  errors expose one, and ORA-01555 — "snapshot too old", one of Oracle's most common
+  errors — is `SQLITE_CONSTRAINT_PRIMARYKEY`, so it was reported as a duplicate key. Any
+  application enum with a `Code() int` of 5 or 6 was classified too. The message must
+  now look like SQLite as well; the code still decides which class.
+- **A lock timeout was called a serialization failure**, and `IsRetryable` promised the
+  transaction had been rolled back. MySQL rolls back only the failed statement unless
+  `innodb_rollback_on_timeout` is on, so following that advice re-runs a transaction
+  that is still open and still holding its locks. `ClassLockTimeout` is separate now.
+- **`errors.Join` and multi-`%w` were not traversed**, so the shape a retry loop
+  produces — `fmt.Errorf("attempt 1: %w; attempt 2: %w", …)` — was exactly the shape that
+  lost its classification.
+- **`SQLITE_BUSY_SNAPSHOT` (517), the WAL write-write conflict, was missing**, and was
+  only classified because its message happened to contain "database is locked". The
+  mechanism documented as reliable missed the one case where "serialization failure" is
+  precisely the right name, and the one documented as fragile was carrying it.
+
+Smaller: MariaDB's CHECK violation is 4025 rather than 3819, so `IsCheckViolation` was
+dead for every MariaDB deployment; `Error 1062` matched `Error 10620`, which MySQL 8 uses
+for server log events; and PostgreSQL's `23P01` exclusion violation had no class.
+
+The test that claimed to keep a new class from rendering as "unknown" iterated a
+hand-written map, so it could only check the classes someone remembered to add to it. It
+walks the enum now.
 
 ### 16. `ossein wire` cannot detect its own staleness
 

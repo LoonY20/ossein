@@ -207,6 +207,93 @@ The callback error is preserved for `errors.Is`. Panics are rolled back before
 being re-thrown. Use `*sql.TxOptions` when a specific isolation level or
 read-only transaction is required.
 
+## Classifying errors
+
+Branching on a database failure — "that code is taken, generate another", "that
+transaction lost a deadlock, run it again" — otherwise means matching a driver's
+message, which breaks the day the DSN points at a different engine:
+
+```go
+if database.IsUniqueViolation(err) {
+    return errCodeTaken
+}
+if database.IsRetryable(err) {
+    return retry(ctx, work)
+}
+```
+
+`Classify` names the failure; `IsUniqueViolation`, `IsExclusionViolation`,
+`IsForeignKeyViolation`, `IsNotNullViolation`, `IsCheckViolation`, `IsLockTimeout`,
+and `IsRetryable` are the predicates. Wrapped errors are unwrapped — including
+`errors.Join` and multi-`%w` wraps, which `errors.Unwrap` alone does not traverse —
+so an error carried up through a repository is still recognised.
+
+`IsRetryable` covers deadlocks and serialization failures: the two classes the
+engine has already rolled back, where re-running the transaction is the documented
+remedy. A **lock timeout is deliberately not one of them**. MySQL rolls back only
+the failed statement unless `innodb_rollback_on_timeout` is on, and SQLite's busy
+errors leave the transaction open too, so re-running without rolling back first
+means running against a half-applied transaction that still holds its locks.
+`IsLockTimeout` is separate for that reason.
+
+Code that is not a SQL driver can take part through the sentinels, so a fake store
+in a test or an adapter in front of another system reaches the same call site:
+
+```go
+return fmt.Errorf("create link: %w", database.ErrUniqueViolation)
+```
+
+### How a driver is recognised, and where that is fragile
+
+This package cannot import a driver: the core has no third-party dependencies, and
+an application should not inherit one it does not use. So errors are recognised
+through whatever a driver exposes, in this order:
+
+1. The sentinels above.
+2. `SQLState() string`, which PostgreSQL drivers implement. A standard, and the most
+   reliable.
+3. `Code() int`, which the pure-Go SQLite driver implements, carrying the result code
+   that distinguishes constraint kinds — *and* a SQLite-shaped message. A bare
+   `Code() int` is no evidence of SQLite: an Oracle driver has one carrying ORA
+   numbers that collide outright (ORA-01555, "snapshot too old", is
+   `SQLITE_CONSTRAINT_PRIMARYKEY`), and so does any small application enum, where a
+   code of 5 would become a lock timeout. The code decides the class; the message
+   only confirms the family.
+4. The error message, for `go-sql-driver/mysql` and `mattn/go-sqlite3`, which keep
+   their codes in struct fields with no accessor.
+
+Each mechanism is tried against the **whole error chain** before the next one is
+tried at all. That is what makes "a structured code wins over text" true rather than
+merely intended: a wrapper's message contains the text of everything it wraps, so
+checking every mechanism at the outermost level first would let a quoted string
+decide the class of the error underneath it — turning a serialization failure that
+should be retried into a unique violation that should not.
+
+The last mechanism is the fragile one: a driver is free to reword its errors, a
+localized message will not match, and a wrapper quoting the wrong text can mislead
+it. MySQL numbers are matched with their delimiter, so `Error 10620` is not
+`Error 1062`. When it is wrong the answer is `ClassUnknown`, which is what an
+application would have had anyway.
+
+MySQL's SQLSTATE is deliberately not read. It reports every integrity constraint as
+`23000`, so trusting it would name a broken foreign key a duplicate key.
+
+### Teaching it a driver
+
+```go
+classifier := database.NewClassifier(func(err error) (database.ErrorClass, bool) {
+    var driverErr *somedriver.Error
+    if errors.As(err, &driverErr) && driverErr.Code == 1234 {
+        return database.ClassUniqueViolation, true
+    }
+    return database.ClassUnknown, false
+})
+```
+
+Recognizers run before the built-in ones, so this both extends and corrects. An
+application that imports its driver anyway can assert on the concrete type, which is
+always more reliable than anything this package can do from the outside.
+
 ## Migrations
 
 Connection management is driver-neutral, but migration SQL is not. The

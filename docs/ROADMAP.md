@@ -151,8 +151,8 @@ Goal: make Ossein useful for real backend services.
       request into the worker, `ossein.ContextWithRequestID` carries one into work
       that has no request, and `context.WithoutCancel` already covered a goroutine
       started from a handler
-- [ ] driver-neutral SQL error classification: unique violation, deadlock,
-      serialization failure (today applications string-match driver messages)
+- [x] driver-neutral SQL error classification: unique violation, broken
+      reference, deadlock, serialization failure (`database.Classify`)
 - [x] cache contract
 - [x] in-memory cache driver
 - [x] memory cache driver amortized expiration sweeping
