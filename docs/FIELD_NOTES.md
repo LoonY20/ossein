@@ -669,7 +669,7 @@ hooksink's probe was inverted: it now asserts that `http.TimeoutHandler` still h
 the writer, which is the standing reason to prefer the framework's, and that the
 framework's keeps tracking, flushing, and the error contract.
 
-### 12. `cache.Store` has no atomic claim operation
+### 12. `cache.Store` has no atomic claim operation — RESOLVED
 
 Idempotency — the core requirement of any webhook receiver — needs "insert if
 absent". With only `Get`/`Set`/`Delete`, the check-then-set in hooksink is racy
@@ -685,6 +685,42 @@ concrete use case that should drive its shape.
 that the memory driver implements under its existing lock, plus a
 `cache.Claim(ctx, store, key, ttl) (bool, error)` helper that falls back to
 Get-then-Set and documents the weaker guarantee.
+
+**Resolution.** `cache.Adder` and `cache.Claim`, with `hooksink`'s idempotency check
+rewritten onto them. The test that used to demonstrate the race now asserts that exactly
+one of 24 concurrent retries is accepted and exactly one job is enqueued.
+
+**One deliberate departure from the proposal above:** `Claim` does *not* fall back to
+Get-then-Set. It reports `ErrNotAtomic`. Documenting a weaker guarantee is not the same
+as providing one, and the failure the fallback produces — duplicate processing — surfaces
+as an application bug in a system nobody suspects, long after the store was swapped for a
+network cache. An error at the call site names the actual problem. The in-memory driver
+implements `Adder`, so the default path is unaffected; a driver that cannot must say so.
+
+**And the defect the review found in the first implementation, which I had introduced:**
+claiming the idempotency key *before* enqueueing meant that a delivery shed with a `503` —
+asking the provider to resend — kept its claim, and the resend was then answered as a
+duplicate. The delivery was never processed and could not be for 24 hours. Making the
+concurrent case correct had converted duplicate work into **lost** work, which for a
+webhook receiver is strictly worse, and the shape came straight from the proposal in this
+note.
+
+`cache.Once` exists because of that: it claims, runs the work, and releases the claim if
+the work fails. Releasing goes through `context.WithoutCancel`, since work that failed
+because its context ended is exactly the case where the release matters and a dead
+context would deny it.
+
+Two more things the review turned up, both of which the tests said were covered:
+
+- **`Add`'s eviction bookkeeping had no coverage at all.** Three mutations that corrupt
+  it — dropping the removal of a replaced element, never tracking a new one, tracking one
+  twice — all passed the suite, each producing an unbounded leak of list elements that
+  nothing would ever reclaim. The test that claimed to guard it called `PurgeExpired`,
+  which walks the map and never looks at the list, so it could not fail for its stated
+  reason. There is now an invariant check over both structures and a 400-operation hammer.
+- **Nothing verified that `Claim`'s TTL reached the store.** Dropping it, or shortening it
+  to a nanosecond, passed both suites — the second being precisely the failure the claim
+  exists to prevent, since a retry a millisecond later would be accepted as new work.
 
 ### 13. The memory cache has no bound on resident size
 

@@ -160,8 +160,8 @@ Goal: make Ossein useful for real backend services.
 - [ ] memory cache driver configurable size bounds and eviction policy
 - [x] documented cache semantics for undecodable entries and backend
       write failures
-- [ ] optional atomic cache capability interfaces — needed for idempotency
-      keys, where `Get`-then-`Set` is racy by construction
+- [x] optional atomic cache capability interfaces — `cache.Adder`, `cache.Claim`,
+      and `cache.Once`, for idempotency keys, run-once jobs, and leases
 - [ ] lifecycle-managed cleanup for the memory driver: sampled reclamation is
       driven by traffic, so a process idle after a burst holds expired entries
       until its next write
