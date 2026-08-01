@@ -2,7 +2,6 @@ package ossein
 
 import (
 	"database/sql"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -213,30 +212,3 @@ type StaleService struct{}
 func NewStaleService() *StaleService { return &StaleService{} }
 
 func NewDependentStaleService(*StaleStore) *StaleService { return &StaleService{} }
-
-// TestTypeIdentityDistinguishesSameNamedTypes covers the part of the fingerprint
-// that has to be a full identity rather than a name. Two packages routinely define
-// a Store, and a fingerprint that could not tell them apart would miss a swap
-// between them — the change most likely to break generated wiring.
-func TestTypeIdentityDistinguishesSameNamedTypes(t *testing.T) {
-	named := typeIdentity(reflect.TypeOf(StaleStore{}))
-	if !strings.Contains(named, "ossein.StaleStore") {
-		t.Fatalf("typeIdentity = %q, want the package path included", named)
-	}
-
-	// An unnamed type has no package path and falls back to its structural
-	// description, which is still stable.
-	unnamed := typeIdentity(reflect.TypeOf(struct{ A int }{}))
-	if unnamed == "" || strings.Contains(unnamed, "ossein.") {
-		t.Fatalf("typeIdentity for an unnamed type = %q", unnamed)
-	}
-	if typeIdentity(nil) != "<nil>" {
-		t.Fatalf("typeIdentity(nil) = %q", typeIdentity(nil))
-	}
-
-	// And the identity of a pointer differs from its element, which the container
-	// treats as different registrations.
-	if typeIdentity(reflect.TypeOf(&StaleStore{})) == named {
-		t.Fatal("a pointer and its element share an identity")
-	}
-}

@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -117,6 +118,7 @@ func (g *wiringGenerator) collect(container *Container) error {
 
 	g.services = make(map[reflect.Type]*wiringService, len(keys))
 	usedFields := map[string]reflect.Type{}
+	usedVars := map[string]bool{}
 	for _, key := range keys {
 		registration := registrations[key]
 		service := &wiringService{
@@ -137,7 +139,15 @@ func (g *wiringGenerator) collect(container *Container) error {
 		}
 		usedFields[fieldName] = key
 		service.fieldName = fieldName
-		service.varName = lowerCamel(fieldName)
+
+		// Field names are unique, but the names derived from them are not:
+		// HTTPClient and HttpClient both lower to httpClient, and the result would
+		// be two Wire parameters with one name — code the generator reports as
+		// written and the compiler then rejects, in a file the user is told not to
+		// edit. Uniqueness is enforced here rather than hoped for.
+		varName := uniqueVarName(lowerCamel(fieldName), usedVars)
+		usedVars[varName] = true
+		service.varName = varName
 
 		typeSource, err := g.typeSource(key)
 		if err != nil {
@@ -514,10 +524,6 @@ func isAllDigits(value string) bool {
 // DB becomes db, ID becomes id, and HTTPClient becomes httpClient.
 func lowerCamel(name string) string {
 	runes := []rune(name)
-	if len(runes) == 0 {
-		return name
-	}
-
 	capitals := 0
 	for capitals < len(runes) && unicode.IsUpper(runes[capitals]) {
 		capitals++
@@ -525,6 +531,8 @@ func lowerCamel(name string) string {
 
 	switch {
 	case capitals == 0:
+		// A name that does not start with a capital, which the field names this is
+		// called with never are, but the function is not only reachable from them.
 		return name
 	case capitals == len(runes):
 		// All capitals, so the whole name is the acronym.
@@ -538,6 +546,35 @@ func lowerCamel(name string) string {
 		}
 	}
 	return string(runes)
+}
+
+// uniqueVarName returns a usable, unused identifier for a generated variable.
+//
+// A lowered type name can collide with a Go keyword as well as with another
+// variable: a type named IF lowers to "if". Both are resolved the same way, by
+// suffixing, because either produces source that does not compile.
+func uniqueVarName(name string, used map[string]bool) string {
+	if name == "" {
+		name = "value"
+	}
+	if !used[name] && !goKeywords[name] {
+		return name
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := name + strconv.Itoa(suffix)
+		if !used[candidate] && !goKeywords[candidate] {
+			return candidate
+		}
+	}
+}
+
+// goKeywords are the identifiers a generated variable cannot be named.
+var goKeywords = map[string]bool{
+	"break": true, "case": true, "chan": true, "const": true, "continue": true,
+	"default": true, "defer": true, "else": true, "fallthrough": true, "for": true,
+	"func": true, "go": true, "goto": true, "if": true, "import": true,
+	"interface": true, "map": true, "package": true, "range": true, "return": true,
+	"select": true, "struct": true, "switch": true, "type": true, "var": true,
 }
 
 func sanitizeIdentifier(value string) string {
@@ -570,8 +607,13 @@ func sanitizeIdentifier(value string) string {
 // builds each one, what each needs, and how long each lives. Renaming a variable
 // inside a constructor does not change it; adding a parameter to one does.
 //
-// The value is stable across processes and builds, so it can be compared with a
-// constant compiled at another time. It is not a security primitive.
+// The value is stable across processes and builds for the registrations generated
+// wiring supports — exported, named, top-level constructors — so it can be compared
+// with a constant compiled at another time. It is not stable for a closure, whose
+// generated name carries a counter that moves when an unrelated closure is added
+// earlier in the same function; generation rejects those anyway.
+//
+// It is not a security primitive.
 func (a *App) WiringFingerprint() string {
 	if a == nil || a.services == nil {
 		return ""
@@ -593,7 +635,12 @@ func (c *Container) fingerprint() string {
 
 		source := "instance"
 		if registration.constructor.IsValid() {
-			source = runtime.FuncForPC(registration.constructor.Pointer()).Name()
+			// The return arity is part of it because the generated call site
+			// depends on it: one return is `x := New()`, two is `x, err := New()`
+			// with an error check and an fmt import.
+			source = fmt.Sprintf("%s/%d",
+				runtime.FuncForPC(registration.constructor.Pointer()).Name(),
+				registration.constructor.Type().NumOut())
 		}
 
 		entries = append(entries, fmt.Sprintf("%s|%s|%s|%d",
@@ -607,7 +654,14 @@ func (c *Container) fingerprint() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// typeIdentity names a type stably, including its package path.
+// typeIdentity names a type stably, including the package path of every named
+// type inside it.
+//
+// reflect.Type.PkgPath is empty for a composite, and reflect.Type.String uses only
+// the short package name — so *a/svc.Config and *b/svc.Config are both "*svc.Config"
+// and would share a fingerprint. Almost every registration is a pointer, and an
+// Instance registration has no constructor name to fall back on, so the composite
+// forms are walked.
 func typeIdentity(t reflect.Type) string {
 	if t == nil {
 		return "<nil>"
@@ -615,5 +669,20 @@ func typeIdentity(t reflect.Type) string {
 	if path := t.PkgPath(); path != "" {
 		return path + "." + t.Name()
 	}
-	return t.String()
+
+	switch t.Kind() {
+	case reflect.Pointer:
+		return "*" + typeIdentity(t.Elem())
+	case reflect.Slice:
+		return "[]" + typeIdentity(t.Elem())
+	case reflect.Array:
+		return fmt.Sprintf("[%d]%s", t.Len(), typeIdentity(t.Elem()))
+	case reflect.Map:
+		return "map[" + typeIdentity(t.Key()) + "]" + typeIdentity(t.Elem())
+	case reflect.Chan:
+		return t.ChanDir().String() + " " + typeIdentity(t.Elem())
+	default:
+		// A builtin, or a shape with no named parts to disambiguate.
+		return t.String()
+	}
 }
