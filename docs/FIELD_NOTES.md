@@ -950,11 +950,57 @@ not move it either, which a naive hash over map iteration would have got wrong.
 
 The package-main constraint is documented as a prerequisite rather than discovered.
 
-### 17. No test client or response assertions
+### 17. No test client or response assertions — RESOLVED
 
 Both services hand-rolled the same request helper and JSON decoding. This is
 Phase 6 on the roadmap; the note is only that it was the first thing missed in
 both projects.
+
+**Resolution.** The `apitest` package.
+
+Writing it turned up the part that justifies it being in the framework rather than
+being a general HTTP testing library: the assertions that read the *error envelope*.
+Both applications checked errors with `strings.Contains(body, "validation_failed")`,
+which passes if the code appears anywhere — including inside a message about something
+else — and cannot say which field failed. `AssertError` and `AssertFieldError` decode
+the document the error handler renders, so converting those tests made two of them
+strictly stronger rather than merely shorter.
+
+One smaller decision worth recording: failures print the request and the body. "got
+500, want 200" sends someone to add a print statement; naming the request and showing
+what came back is the difference between a red test that explains itself and one that
+starts an investigation.
+
+**And what the review found in the first implementation**, three of which were worse
+than the boilerplate they replaced:
+
+- **A client held across a `t.Run` boundary broke the suite.** The client keeps its
+  `testing.TB`, and `FailNow` ends the goroutine it is called on — so a failure inside a
+  subtest was filed under the parent, *the remaining subtests never ran*, and under
+  `t.Parallel` the process died. The pattern every doc demonstrated was the broken one.
+  `WithT` derives a client for a subtest.
+- **`Result` handed out a body the assertions had already drained**, so mixing the two
+  read nothing — in either order, silently, including in the failure messages that print
+  the body. Both halves of "nothing is hidden" were false.
+- **A path without a leading slash panicked the test binary** rather than failing a test,
+  which is the most likely typo there is.
+- **`Do` wrote the client's headers into the caller's request**, so an unauthenticated
+  client re-sending it carried the API key — the exact "passes for the wrong reason" the
+  helper claims to prevent.
+- **Strict decoding was the wrong default.** It rejects a target that declares one field
+  of a two-field response, which is the ordinary case, and it does nothing at three of
+  the four real call sites, where the test decodes into the application's own response
+  type and a renamed tag moves both together. It is opt-in now.
+
+Two claims in the code were also false: `AssertHeader` and `AssertFieldError` did not
+print the body they promised to, and the justification for hand-rolling percent-encoding
+("importing net/url pulls in a parser") was wrong — `net/http` already imports it. That
+code is gone, and `PostForm` takes `url.Values`, which can express a repeated field at
+all.
+
+The package's own tests use a `testing.TB` that records instead of failing, so every
+assertion is checked in both directions: that it fails when it should, with a message
+containing what a reader needs, and that it stays quiet when it should not.
 
 ## Suggested roadmap changes
 
