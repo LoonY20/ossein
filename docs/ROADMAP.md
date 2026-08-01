@@ -147,11 +147,10 @@ Goal: make Ossein useful for real backend services.
       binding path and `Context.Body`)
 - [ ] private network access preflight headers, which Chrome requires for a public
       page calling a private-network service
-- [ ] detached background context preserving the request ID and request-scoped
-      logger, for deferred work and queue workers — `context.WithoutCancel` already
-      covers a goroutine started from a handler, and `ContextWithLogger` a worker's
-      own logger; what is missing is carrying the enqueuing request's ID *into* a
-      job, so the two halves of a webhook can be correlated in the logs
+- [x] request identity across deferred work: `Job.RequestID` carries the enqueuing
+      request into the worker, `ossein.ContextWithRequestID` carries one into work
+      that has no request, and `context.WithoutCancel` already covered a goroutine
+      started from a handler
 - [ ] driver-neutral SQL error classification: unique violation, deadlock,
       serialization failure (today applications string-match driver messages)
 - [x] cache contract

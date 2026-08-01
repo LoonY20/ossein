@@ -75,6 +75,29 @@ type Job struct {
 	// The worker owns it: a value set before submission is overwritten, so a Job value
 	// can be resubmitted without carrying a spent retry budget with it.
 	Attempt int
+
+	// RequestID is the identity of whatever enqueued the job, filled in by Enqueue
+	// from the context when it is empty.
+	//
+	// It is what connects the two halves of an asynchronous request. A webhook is
+	// accepted under one request ID and processed some time later on a worker, and
+	// without carrying the ID across, finding both in a log means guessing from
+	// timestamps. The worker puts it back into the job's context, so
+	// ossein.RequestIDFromContext works inside a handler and every line it logs
+	// carries it.
+	//
+	// It travels with the job, so a driver that persists Name, Payload, and this
+	// field keeps the connection across a restart. Attempt is deliberately not in
+	// that set: the worker owns it.
+	//
+	// Set it explicitly for work whose origin the context does not know — a replay,
+	// or a job restored from storage.
+	//
+	// For an HTTP request the value can come from the client, since an inbound
+	// X-Request-ID is honoured so a caller can correlate across services. It is
+	// length-capped and trimmed but otherwise arbitrary text, so treat it as input
+	// wherever it is stored: a dead-letter row, a cache key, a downstream header.
+	RequestID string
 }
 
 // Handler processes one job. Returning an error schedules a retry until the attempt
@@ -155,9 +178,12 @@ func WithBackoff(backoff func(attempt int) time.Duration) Option {
 	}
 }
 
-// WithLogger sets the logger jobs and failures are reported through. Each job's
-// context carries a logger with the job name and attempt attached, reachable with
-// ossein.LoggerFromContext.
+// WithLogger sets the logger jobs and failures are reported through.
+//
+// Each job's context carries a logger with the job's request ID, name, attempt, and
+// worker attached, reachable with ossein.LoggerFromContext. A logger that already
+// carries a request_id attribute will emit two of them, since slog appends rather
+// than replaces; give the queue the application's base logger, not a scoped one.
 func WithLogger(logger *slog.Logger) Option {
 	return func(o *options) {
 		if logger != nil {
@@ -172,6 +198,11 @@ func WithLogger(logger *slog.Logger) Option {
 // It is called both for a job that exhausted its attempts and for one whose retries
 // were cut short by shutdown; errors.Is(err, ErrAbandoned) separates the two, and
 // only the first is genuinely dead.
+//
+// The context carries the job's request ID and a logger scoped to the job, so a
+// dead-letter record can name the request that produced it. It is never derived
+// from a cancelled context: this is the last chance to record the job, and a drain
+// that ran out of time would otherwise deny the write.
 //
 // It runs on the worker's goroutine, so it should be quick and must not panic; a
 // panic in it is recovered and logged.
@@ -354,6 +385,10 @@ func (m *Memory) Enqueue(ctx context.Context, job Job) error {
 		return fmt.Errorf("%w: %q", ErrNoHandler, job.Name)
 	}
 
+	if job.RequestID == "" {
+		job.RequestID = ossein.RequestIDFromContext(ctx)
+	}
+
 	// Held across the send, so the queue cannot be closed between the check and the
 	// submission. Stop takes the write side, so it waits for submissions in flight.
 	m.closeMu.RLock()
@@ -481,12 +516,9 @@ func (m *Memory) process(worker int, handlers map[string]Handler, job Job) {
 	for attempt := 1; attempt <= m.settings.maxAttempts; attempt++ {
 		job.Attempt = attempt
 
-		logger := m.settings.logger.With(
-			"job", job.Name,
-			"attempt", attempt,
-			"worker", worker,
-		)
-		ctx := ossein.ContextWithLogger(m.jobCtx, logger)
+		logger := m.jobLogger(job).With("worker", worker)
+		ctx := ossein.ContextWithRequestID(m.jobCtx, job.RequestID)
+		ctx = ossein.ContextWithLogger(ctx, logger)
 
 		lastErr = m.invoke(ctx, handler, job)
 		if lastErr == nil {
@@ -518,6 +550,19 @@ func (m *Memory) process(worker int, handlers map[string]Handler, job Job) {
 	m.reportFailure(job, lastErr)
 }
 
+// jobLogger builds the logger every line about a job is written through.
+//
+// The request ID comes first so it lines up across the request's own log lines and
+// its job's, which is the point of carrying it. A job with no origin gets no
+// attribute rather than an empty one: "request_id=" reads as an ID that was lost.
+func (m *Memory) jobLogger(job Job) *slog.Logger {
+	logger := m.settings.logger
+	if job.RequestID != "" {
+		logger = logger.With("request_id", job.RequestID)
+	}
+	return logger.With("job", job.Name, "attempt", job.Attempt)
+}
+
 // invoke runs the handler, turning a panic into an error so one bad job cannot take
 // the worker pool down and stop all deferred work.
 func (m *Memory) invoke(ctx context.Context, handler Handler, job Job) (err error) {
@@ -542,13 +587,14 @@ func (m *Memory) invoke(ctx context.Context, handler Handler, job Job) (err erro
 // reportFailure hands an exhausted job to the application, guarding against a panic
 // in the callback.
 func (m *Memory) reportFailure(job Job, err error) {
+	// Built before the branch below, because the default path is the one that most
+	// needs it: without a failure handler this line is the only record the job died,
+	// and an ID on the retry warnings but not on the death reads as a job still
+	// being retried.
+	logger := m.jobLogger(job)
+
 	if m.settings.onFailure == nil {
-		m.settings.logger.Error(
-			"ossein queue: job exhausted its attempts",
-			"job", job.Name,
-			"attempts", job.Attempt,
-			"error", err,
-		)
+		logger.Error("ossein queue: job exhausted its attempts", "error", err)
 		return
 	}
 
@@ -566,8 +612,8 @@ func (m *Memory) reportFailure(job Job, err error) {
 	// record the job, and a drain that ran out of time has already cancelled that
 	// context — handing over a dead context would deny the dead-letter write the very
 	// moment it matters most.
-	logger := m.settings.logger.With("job", job.Name, "attempt", job.Attempt)
-	m.settings.onFailure(ossein.ContextWithLogger(context.Background(), logger), job, err)
+	ctx := ossein.ContextWithRequestID(context.Background(), job.RequestID)
+	m.settings.onFailure(ossein.ContextWithLogger(ctx, logger), job, err)
 }
 
 // wait sleeps between attempts, returning false if shutdown began meanwhile so the
