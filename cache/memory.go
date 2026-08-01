@@ -183,3 +183,49 @@ func (m *Memory) currentTime() time.Time {
 }
 
 var _ Store = (*Memory)(nil)
+
+// Add stores a value only when the key is free, and reports whether it did.
+//
+// The check and the write happen under one lock, which is what separates this
+// from Get followed by Set: there is no window for a second caller to see the
+// same miss.
+func (m *Memory) Add(
+	ctx context.Context,
+	key string,
+	value []byte,
+	ttl time.Duration,
+) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := validateKey(key); err != nil {
+		return false, err
+	}
+	if err := validateTTL(ttl); err != nil {
+		return false, err
+	}
+
+	cloned := bytes.Clone(value)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.entries == nil {
+		m.entries = make(map[string]memoryEntry)
+	}
+
+	now := m.currentTime()
+	if existing, ok := m.entries[key]; ok {
+		if existing.expiresAt.IsZero() || now.Before(existing.expiresAt) {
+			return false, nil
+		}
+		// Expired: the key is free, and the stale entry is replaced below.
+		m.deleteLocked(key, existing)
+	}
+	m.purgeSampleLocked(now)
+
+	entry := memoryEntry{value: cloned, orderElement: m.order.PushBack(key)}
+	if ttl > 0 {
+		entry.expiresAt = now.Add(ttl)
+	}
+	m.entries[key] = entry
+	return true, nil
+}

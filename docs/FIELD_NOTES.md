@@ -669,7 +669,7 @@ hooksink's probe was inverted: it now asserts that `http.TimeoutHandler` still h
 the writer, which is the standing reason to prefer the framework's, and that the
 framework's keeps tracking, flushing, and the error contract.
 
-### 12. `cache.Store` has no atomic claim operation
+### 12. `cache.Store` has no atomic claim operation — RESOLVED
 
 Idempotency — the core requirement of any webhook receiver — needs "insert if
 absent". With only `Get`/`Set`/`Delete`, the check-then-set in hooksink is racy
@@ -685,6 +685,17 @@ concrete use case that should drive its shape.
 that the memory driver implements under its existing lock, plus a
 `cache.Claim(ctx, store, key, ttl) (bool, error)` helper that falls back to
 Get-then-Set and documents the weaker guarantee.
+
+**Resolution.** `cache.Adder` and `cache.Claim`, with `hooksink`'s idempotency check
+rewritten onto them. The test that used to demonstrate the race now asserts that exactly
+one of 24 concurrent retries is accepted and exactly one job is enqueued.
+
+**One deliberate departure from the proposal above:** `Claim` does *not* fall back to
+Get-then-Set. It reports `ErrNotAtomic`. Documenting a weaker guarantee is not the same
+as providing one, and the failure the fallback produces — duplicate processing — surfaces
+as an application bug in a system nobody suspects, long after the store was swapped for a
+network cache. An error at the call site names the actual problem. The in-memory driver
+implements `Adder`, so the default path is unaffected; a driver that cannot must say so.
 
 ### 13. The memory cache has no bound on resident size
 

@@ -115,6 +115,15 @@ Ossein uses semantic versioning for published releases.
   map write. A panic on the handler's goroutine is forwarded to the request goroutine
   for `Recover`, and one arriving after the deadline is logged rather than lost
 
+- `cache.Adder`, an optional capability for storing a value only when a key is free,
+  implemented by the in-memory driver under its existing lock, and `cache.Claim` for the
+  case that motivates it: an idempotency key, a run-once job, or a lease. `Get`-then-`Set`
+  is what applications write today and it is racy by construction — two callers both miss,
+  both store, and both proceed — with a window that is sub-microsecond against a local map
+  and routine against a network cache, which is exactly where duplicate work is expensive.
+  `Claim` reports `ErrNotAtomic` against a store that cannot provide the guarantee rather
+  than falling back to the racy form, because a guarantee that quietly is not one produces
+  a failure that looks like an application bug
 - a `queue` package for background work: `queue.Memory` is a bounded in-process
   job queue with a worker pool, per-job-name handlers, retries with backoff, and
   a drain on shutdown, and `queue.Register` ties it into the application
