@@ -126,14 +126,20 @@ Ossein uses semantic versioning for published releases.
   a failure that looks like an application bug. A claim is a lease, so its TTL must be
   positive: one that never expires is a tombstone that only an explicit delete can lift
 - driver-neutral SQL error classification: `database.Classify`, plus
-  `IsUniqueViolation`, `IsForeignKeyViolation`, `IsNotNullViolation`,
-  `IsCheckViolation`, and `IsRetryable`. Detecting a duplicate key otherwise means
+  `IsUniqueViolation`, `IsExclusionViolation`, `IsForeignKeyViolation`,
+  `IsNotNullViolation`, `IsCheckViolation`, `IsLockTimeout`, and `IsRetryable`, with
+  sentinel errors so a fake store or a non-SQL adapter can report the same classes.
+  A lock timeout is deliberately not retryable: the engine may have rolled back only
+  the failed statement and left the transaction open. Detecting a duplicate key otherwise means
   matching a driver's message in application code, which silently breaks the day the
   DSN points at a different engine — a change the `database` package otherwise makes a
   config edit. Errors are recognised through the interfaces drivers expose, a SQLSTATE
-  or a SQLite extended code, before falling back to matching text for drivers that put
-  the code nowhere else; MySQL's SQLSTATE 23000 is deliberately not read, since it names
-  any integrity constraint. `database.NewClassifier` takes recognizers that run before
+  or a SQLite result code, before falling back to matching text for drivers that put the
+  code nowhere else. Each mechanism is tried against the whole error chain before the
+  next, so a wrapper's message — which contains the text of everything it wraps — cannot
+  overrule a code further down. A `Code() int` method alone is not treated as evidence of
+  SQLite, since an Oracle driver has one whose numbers collide outright. MySQL's SQLSTATE
+  23000 is deliberately not read, since it names any integrity constraint. `database.NewClassifier` takes recognizers that run before
   the built-in ones, because this package cannot import a driver and should not have to
   be released before an application can teach it about one
 - `cache.WithMaxEntries` caps how much the in-memory driver holds, evicting the least
