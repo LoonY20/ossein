@@ -261,3 +261,72 @@ func TestAddOverAnExpiredEntryOutsideTheSampleRemovesItsElement(t *testing.T) {
 
 	checkOrderInvariant(t, store)
 }
+
+// TestGetRechecksAnExpiredCandidateUnderTheExclusiveLock covers the window the
+// unbounded read path exists to handle. The shared lock finds the entry expired,
+// releases, and takes the exclusive lock — and by then another goroutine may have
+// replaced or removed the key, so the decision has to be made again.
+//
+// Both interleavings are driven through the injectable clock rather than by
+// racing goroutines, which would make the test a coin flip.
+func TestGetRechecksAnExpiredCandidateUnderTheExclusiveLock(t *testing.T) {
+	t.Run("replaced by a live entry", func(t *testing.T) {
+		store := NewMemory()
+		ctx := context.Background()
+
+		base := time.Now()
+		store.now = func() time.Time { return base }
+		if err := store.Set(ctx, "key", []byte("v"), time.Minute); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+
+		// Expired to the shared read, live again by the time the exclusive lock is
+		// held — the shape of a concurrent Set landing in between.
+		reads := 0
+		store.now = func() time.Time {
+			reads++
+			if reads == 1 {
+				return base.Add(2 * time.Minute)
+			}
+			return base
+		}
+
+		value, err := store.Get(ctx, "key")
+		if err != nil {
+			t.Fatalf("Get: %v, want the refreshed value", err)
+		}
+		if string(value) != "v" {
+			t.Fatalf("value = %q", value)
+		}
+	})
+
+	t.Run("removed entirely", func(t *testing.T) {
+		store := NewMemory()
+		ctx := context.Background()
+
+		base := time.Now()
+		store.now = func() time.Time { return base }
+		if err := store.Set(ctx, "key", []byte("v"), time.Minute); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+
+		// The second call runs with the exclusive lock held, which is the only
+		// point where a concurrent Delete could have completed. Removing the entry
+		// from inside it reproduces that without a second goroutine.
+		reads := 0
+		store.now = func() time.Time {
+			reads++
+			if reads == 2 {
+				if entry, ok := store.entries["key"]; ok {
+					store.deleteLocked("key", entry)
+				}
+			}
+			return base.Add(2 * time.Minute)
+		}
+
+		if _, err := store.Get(ctx, "key"); err != ErrMiss {
+			t.Fatalf("Get = %v, want ErrMiss", err)
+		}
+		checkOrderInvariant(t, store)
+	})
+}

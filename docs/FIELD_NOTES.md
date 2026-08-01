@@ -722,7 +722,7 @@ Two more things the review turned up, both of which the tests said were covered:
   to a nanosecond, passed both suites — the second being precisely the failure the claim
   exists to prevent, since a retry a millisecond later would be accepted as new work.
 
-### 13. The memory cache has no bound on resident size
+### 13. The memory cache has no bound on resident size — RESOLVED
 
 Write-only keys *are* reclaimed: `Set` calls `purgeSampleLocked` on every write
 (`cache/memory.go:104`), which walks up to 16 entries from the front of a
@@ -742,6 +742,22 @@ substantive fix; it is what turns "does not leak" into "cannot exceed a
 configured budget". An opt-in lifecycle janitor
 (`cache.RegisterMemory(app, …)`) additionally covers the idle-after-burst case
 without every application writing its own ticker.
+
+**Resolution.** Both. `WithMaxEntries` caps the driver with least-recently-used
+eviction, and `RegisterMemory` binds the store and runs the janitor; `hooksink`'s
+hand-written ticker and `linkr`'s hand-written binding are both gone.
+
+The eviction policy forced a decision the note glossed over. The ordering list the
+driver already had is a *cleanup cursor*, not an access order: sampling rotates live
+entries to the back, which under LRU semantics would mark a cold entry as hot and let
+cleanup decide what survives eviction. So a bound needs the list to mean something
+different — and recording a read means taking the exclusive lock, where an unbounded
+read takes a shared one.
+
+Rather than pay that everywhere or ship an eviction order that is not really LRU, the
+two modes are separate and each internally consistent: unbounded keeps today's shared
+read and rotating cursor, bounded promotes on read and scans without reordering. The
+cost is stated where the bound is configured rather than buried.
 
 ### 14. Background work cannot inherit request identity
 

@@ -209,7 +209,16 @@ func (c *Container) provide(key reflect.Type, constructor any, options ...Servic
 		}
 	}
 
-	inputs := make([]reflect.Type, constructorType.NumIn())
+	// A variadic parameter is options, not a dependency: nothing can be resolved
+	// for a []Option, and the useful reading of a constructor that takes one is
+	// "call it with none". Without this, adding an option parameter to an existing
+	// constructor breaks every application that registers it.
+	parameters := constructorType.NumIn()
+	if constructorType.IsVariadic() {
+		parameters--
+	}
+
+	inputs := make([]reflect.Type, parameters)
 	for i := range inputs {
 		inputs[i] = constructorType.In(i)
 	}
