@@ -647,8 +647,8 @@ one for work that must not be lost, which needs a durable driver behind the same
 it back, so both halves of an asynchronous request appear in the log under one ID:
 
 ```
-level=INFO msg="request completed" request_id=8f7aab71 method=POST path=/webhooks
-level=INFO msg="delivering downstream" request_id=8f7aab71 job=webhook.delivery attempt=1
+level=INFO msg="request completed" request_id=8f7aab71 method=POST path=/webhooks status=202 bytes=48 duration_ms=3
+level=INFO msg="delivering downstream" request_id=8f7aab71 job=webhook.delivery attempt=1 worker=0
 ```
 
 `ossein.RequestIDFromContext` works inside a job handler for the same reason. The ID

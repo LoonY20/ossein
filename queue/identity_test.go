@@ -192,3 +192,161 @@ func stopQueue(t *testing.T, work *queue.Memory) {
 		t.Errorf("Stop: %v", err)
 	}
 }
+
+// TestADeadJobLogsUnderItsRequestID covers the default path, where no failure
+// handler is configured and this line is the only record the job died. The ID was
+// on the retry warnings and missing from the death, so grepping a request found
+// the failures and then lost the outcome — which reads as a job still being
+// retried.
+func TestADeadJobLogsUnderItsRequestID(t *testing.T) {
+	logs := &syncBuffer{}
+
+	work := queue.NewMemory(
+		queue.WithLogger(slog.New(slog.NewTextHandler(logs, nil))),
+		queue.WithWorkers(1),
+		queue.WithMaxAttempts(2),
+		queue.WithBackoff(func(int) time.Duration { return 0 }),
+	)
+	work.Handle("doomed", func(context.Context, queue.Job) error {
+		return errors.New("nope")
+	})
+	work.Start()
+
+	ctx := ossein.ContextWithRequestID(context.Background(), "req-dead")
+	if err := work.Enqueue(ctx, queue.Job{Name: "doomed"}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	stopQueue(t, work)
+
+	output := logs.String()
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "request_id=req-dead") {
+			t.Fatalf("a line about the job carries no request ID: %q\nfull log: %q",
+				line, output)
+		}
+	}
+	if !strings.Contains(output, "exhausted its attempts") {
+		t.Fatalf("the death was never logged: %q", output)
+	}
+}
+
+// TestTheFailureHandlerLoggerCarriesTheRequestID covers the other half of the
+// dead-letter contract: the handler writes through the context's logger, so that
+// logger has to be scoped to the job rather than bare.
+func TestTheFailureHandlerLoggerCarriesTheRequestID(t *testing.T) {
+	logs := &syncBuffer{}
+	done := make(chan struct{})
+
+	work := queue.NewMemory(
+		queue.WithLogger(slog.New(slog.NewTextHandler(logs, nil))),
+		queue.WithWorkers(1),
+		queue.WithMaxAttempts(1),
+		queue.WithFailureHandler(func(ctx context.Context, _ queue.Job, err error) {
+			ossein.LoggerFromContext(ctx).Error("dead letter", "error", err)
+			close(done)
+		}),
+	)
+	work.Handle("doomed", func(context.Context, queue.Job) error {
+		return errors.New("nope")
+	})
+	work.Start()
+	t.Cleanup(func() { stopQueue(t, work) })
+
+	ctx := ossein.ContextWithRequestID(context.Background(), "req-letter")
+	if err := work.Enqueue(ctx, queue.Job{Name: "doomed"}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the failure was never reported")
+	}
+
+	if !strings.Contains(logs.String(), `msg="dead letter"`) {
+		t.Fatalf("the handler's line is missing: %q", logs.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(line, "dead letter") && !strings.Contains(line, "request_id=req-letter") {
+			t.Fatalf("the dead-letter line carries no request ID: %q", line)
+		}
+	}
+}
+
+// TestTheFailureHandlerContextOutlivesAFailedDrain pins the rule the comment above
+// reportFailure states. A drain that ran out of time cancels the job context, and
+// deriving the failure context from it would deny the dead-letter write at exactly
+// the moment it matters.
+func TestTheFailureHandlerContextOutlivesAFailedDrain(t *testing.T) {
+	reported := make(chan error, 1)
+	release := make(chan struct{})
+
+	work := queue.NewMemory(
+		queue.WithLogger(discardLogger()),
+		queue.WithWorkers(1),
+		queue.WithMaxAttempts(1),
+		queue.WithFailureHandler(func(ctx context.Context, _ queue.Job, _ error) {
+			reported <- ctx.Err()
+		}),
+	)
+	started := make(chan struct{})
+	work.Handle("slow", func(context.Context, queue.Job) error {
+		close(started)
+		<-release
+		return errors.New("nope")
+	})
+	work.Start()
+
+	if err := work.Enqueue(context.Background(), queue.Job{Name: "slow"}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	<-started
+
+	// Give up on the drain, which cancels the job context.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := work.Stop(stopCtx); err == nil {
+		t.Fatal("Stop reported success while the handler was blocked")
+	}
+	close(release)
+
+	select {
+	case err := <-reported:
+		if err != nil {
+			t.Fatalf("the failure handler was given a dead context (%v); "+
+				"a dead-letter write would be refused", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the failure was never reported")
+	}
+}
+
+// TestEnqueueJSONCarriesTheRequestID covers the other half of the Enqueuer
+// interface, which every other test in this file skips.
+func TestEnqueueJSONCarriesTheRequestID(t *testing.T) {
+	seen := make(chan queue.Job, 1)
+
+	work := queue.NewMemory(queue.WithLogger(discardLogger()), queue.WithWorkers(1))
+	work.Handle("encoded", func(_ context.Context, job queue.Job) error {
+		seen <- job
+		return nil
+	})
+	work.Start()
+	t.Cleanup(func() { stopQueue(t, work) })
+
+	ctx := ossein.ContextWithRequestID(context.Background(), "req-json")
+	if err := work.EnqueueJSON(ctx, "encoded", map[string]int{"n": 1}); err != nil {
+		t.Fatalf("EnqueueJSON: %v", err)
+	}
+
+	select {
+	case job := <-seen:
+		if job.RequestID != "req-json" {
+			t.Fatalf("job.RequestID = %q", job.RequestID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the job never ran")
+	}
+}
