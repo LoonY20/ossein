@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"mime"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -264,10 +266,26 @@ func (c *Context) Redirect(status int, location string) error {
 // File serves a file from the filesystem, with range requests, conditional requests,
 // and content-type detection handled by net/http.
 //
+// A missing file, a directory, or an unreadable path is returned as an error rather
+// than being answered by net/http, for two reasons: the handler can fall back or log,
+// and the response stays in the application's error contract instead of the plain-text
+// "404 page not found" that ServeFile would write into a JSON API.
+//
 // The path is trusted. Never build one from request data: nothing here prevents
 // "../../etc/passwd" from resolving. Serve user-selected files with FileFS, which
 // cannot escape the filesystem it is given.
 func (c *Context) File(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileError(path, err)
+	}
+	if info.IsDir() {
+		return NotFound("file_not_found", "File does not exist")
+	}
+	if err := ensureUncommitted(c.Response, "serve file"); err != nil {
+		return err
+	}
+
 	http.ServeFile(c.Response, c.Request, path)
 	return nil
 }
@@ -275,8 +293,29 @@ func (c *Context) File(path string) error {
 // FileFS serves a file from fsys. Unlike File, the name cannot escape fsys, so this is
 // the one to use when the name comes from the request.
 func (c *Context) FileFS(fsys fs.FS, name string) error {
+	info, err := fs.Stat(fsys, name)
+	if err != nil {
+		return fileError(name, err)
+	}
+	if info.IsDir() {
+		return NotFound("file_not_found", "File does not exist")
+	}
+	if err := ensureUncommitted(c.Response, "serve file"); err != nil {
+		return err
+	}
+
 	http.ServeFileFS(c.Response, c.Request, fsys, name)
 	return nil
+}
+
+// fileError maps a lookup failure to the response it deserves. A missing file is the
+// client's answer; anything else — a permission problem, a broken mount — is the
+// server's, and says so rather than reporting the resource as absent.
+func fileError(name string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return NotFound("file_not_found", "File does not exist")
+	}
+	return fmt.Errorf("ossein: serve file %q: %w", name, err)
 }
 
 // Attachment serves a file as a download named filename.
@@ -288,6 +327,17 @@ func (c *Context) FileFS(fsys fs.FS, name string) error {
 func (c *Context) Attachment(path, filename string) error {
 	if filename == "" {
 		return errors.New("ossein: attachment filename cannot be empty")
+	}
+
+	// Checked before the header is set. Setting it first and letting File fail would
+	// leave the name — often user data — on an error response, and a browser following
+	// that download saves the error page under it.
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileError(path, err)
+	}
+	if info.IsDir() {
+		return NotFound("file_not_found", "File does not exist")
 	}
 
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})

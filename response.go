@@ -17,6 +17,9 @@ func JSON(w http.ResponseWriter, status int, value any) error {
 	if err != nil {
 		return err
 	}
+	if err := ensureUncommitted(w, "write JSON response"); err != nil {
+		return err
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -43,6 +46,9 @@ func HTML(w http.ResponseWriter, status int, markup string) error {
 // net/http to sniff: sniffing turns an uploaded file into whatever it looks like,
 // which is how a text/plain upload comes back as HTML.
 func Blob(w http.ResponseWriter, status int, contentType string, data []byte) error {
+	if err := ensureUncommitted(w, "write response"); err != nil {
+		return err
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -61,6 +67,9 @@ func Stream(w http.ResponseWriter, status int, contentType string, source io.Rea
 	if source == nil {
 		return errors.New("ossein: stream source cannot be nil")
 	}
+	if err := ensureUncommitted(w, "stream response"); err != nil {
+		return err
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -73,15 +82,38 @@ func Stream(w http.ResponseWriter, status int, contentType string, source io.Rea
 	return nil
 }
 
+// redirectStatuses are the codes for which Location actually directs the client.
+//
+// A range check would also admit 300, 304, 305, and 306, where Location means something
+// else or nothing at all — 304 in particular must not carry a body, and http.Redirect
+// writes one.
+var redirectStatuses = map[int]bool{
+	http.StatusMovedPermanently:  true,
+	http.StatusFound:             true,
+	http.StatusSeeOther:          true,
+	http.StatusTemporaryRedirect: true,
+	http.StatusPermanentRedirect: true,
+}
+
 // Redirect answers with a redirect to location.
 //
-// The status must be a 3xx, because every other code leaves the Location header as
-// something the client is free to ignore — a redirect that silently does not redirect.
+// The status must be one that actually redirects: 301, 302, 303, 307, or 308. Any other
+// code leaves Location as something the client is free to ignore, which is a redirect
+// that silently does not redirect.
+//
+// It delegates to http.Redirect, so two of that function's behaviors apply. A GET or
+// HEAD receives a short HTML body naming the target, unless the caller has already set
+// a Content-Type. And a relative location is resolved against the request path, so
+// "next" from /a/b becomes /a/next — worth knowing when the location comes from storage
+// rather than from the handler.
 func Redirect(w http.ResponseWriter, r *http.Request, status int, location string) error {
-	if status < http.StatusMultipleChoices || status > http.StatusPermanentRedirect {
-		return fmt.Errorf("ossein: redirect status %d is not a 3xx", status)
+	if !redirectStatuses[status] {
+		return fmt.Errorf("ossein: status %d does not redirect", status)
 	}
 	if err := checkHeaderValue("redirect location", location); err != nil {
+		return err
+	}
+	if err := ensureUncommitted(w, "redirect"); err != nil {
 		return err
 	}
 
@@ -91,12 +123,29 @@ func Redirect(w http.ResponseWriter, r *http.Request, status int, location strin
 
 // checkHeaderValue rejects a value that would break out of its header.
 //
-// Go's own header writer drops a header whose value contains a newline, which turns an
-// injection attempt into a response that is merely missing a header — correct, and
-// impossible to debug. Reporting it is more useful.
+// Go replaces a carriage return or newline in a header value with a space rather than
+// rejecting it, so an injection attempt becomes a header with a quietly mangled value —
+// a Location pointing somewhere the caller never wrote. Reporting it is more useful.
 func checkHeaderValue(what, value string) error {
 	if strings.ContainsAny(value, "\r\n") {
-		return fmt.Errorf("ossein: %s contains a newline: %q", what, value)
+		return fmt.Errorf("ossein: %s contains a line break: %q", what, value)
+	}
+	return nil
+}
+
+// ensureUncommitted reports an error when a response has already been written.
+//
+// Writing a second one appends to the first: the status is whatever was sent, the
+// headers are whatever was sent, and the body is both bodies concatenated, with the
+// only complaint a "superfluous response.WriteHeader call" on the server's log. The
+// check needs the Ossein response writer to be reachable; with a plain net/http writer
+// there is nothing to ask, and the write proceeds.
+func ensureUncommitted(w http.ResponseWriter, what string) error {
+	if tracked, ok := ResponseWriterFrom(w); ok && tracked.Written() {
+		return fmt.Errorf(
+			"ossein: %s: the response was already written with status %d",
+			what, tracked.Status(),
+		)
 	}
 	return nil
 }

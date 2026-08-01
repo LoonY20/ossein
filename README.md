@@ -708,11 +708,22 @@ c.Redirect(http.StatusFound, target)
 ```
 
 An unspecified content type becomes `application/octet-stream` rather than being left
-for `net/http` to sniff, and `Redirect` rejects a non-3xx status and a location
-containing a newline — Go drops such a header, which turns response splitting into a
-redirect that silently does not redirect.
+for `net/http` to sniff. Every helper refuses to write over a response that was already
+sent, which otherwise produces one status, one set of headers, and two bodies
+concatenated, with a "superfluous response.WriteHeader call" in the server log as the
+only symptom.
 
-Files delegate to `net/http`, so range and conditional requests work:
+`Redirect` accepts only a status that actually redirects — 301, 302, 303, 307, 308 — and
+rejects a location containing a line break. Go replaces line breaks in a header value
+with spaces rather than rejecting them, so response splitting becomes a `Location`
+pointing somewhere nobody wrote. It delegates to `http.Redirect`, so a GET receives the
+short HTML body that function writes, and a relative location resolves against the
+request path.
+
+Files delegate to `net/http`, so range and conditional requests work. A missing file, a
+directory, or an unreadable path comes back as an error instead: the handler can fall
+back, and the response stays in the application's error contract rather than the
+plain-text `404 page not found` that `ServeFile` would write into a JSON API.
 
 ```go
 c.File("/var/lib/app/report.pdf")     // trusted path, never one from the request
@@ -753,9 +764,17 @@ the first event, and a writer that cannot flush is reported there rather than at
 first `Send` — a stream that cannot flush delivers nothing until the handler returns,
 which for a stream is never.
 
-Multi-line data becomes multiple `data:` lines, which is what the client rejoins; a
-newline in an ID, name, or comment is rejected, since it would let a value forge an
-event of its own. `Comment` writes a keepalive that clients ignore.
+Multi-line data becomes multiple `data:` lines, which is what the client rejoins.
+Carriage returns are normalized first: a client ends a line on CR, LF, or CRLF, so a
+bare CR left inside data would end the line there and let the rest be read as new
+fields — an attacker-chosen event type and id. A line break in an ID, name, or comment
+is rejected for the same reason, and an event with no data is rejected because no client
+dispatches one. `Comment` writes a keepalive that clients ignore.
+
+A stream must not outlive its handler: `net/http` releases the response once the handler
+returns. Handing the stream to a producer goroutine and writing late used to panic that
+goroutine, where no recovery middleware would see it; it now comes back as an error and
+the stream closes itself.
 
 ## Errors
 

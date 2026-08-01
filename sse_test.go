@@ -315,3 +315,190 @@ func (w *brokenWriter) Write(p []byte) (int, error) {
 func (w *brokenWriter) FlushError() error {
 	return w.flushFail
 }
+
+// TestEventStreamNormalizesCarriageReturnsInData is the injection this encoder existed
+// to prevent and did not. A client ends a line on CR, LF, or CRLF, so a bare CR left in
+// data ends the data line there and everything after it is read as new fields —
+// attacker-chosen event type, attacker-chosen id, attacker-appended payload.
+func TestEventStreamNormalizesCarriageReturnsInData(t *testing.T) {
+	forged := "hi\rid: 999\revent: adminMessage\rdata: you are fired"
+
+	stream, recorder := newTestStream(t)
+	if err := stream.Send(Event{ID: "1", Name: "comment", Data: forged}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	frame := recorder.Body.String()
+	if strings.Contains(frame, "\r") {
+		t.Fatalf("frame carries a raw carriage return: %q", frame)
+	}
+	// Every forged field is now the content of a data line, including the last one,
+	// which arrives at the client as the literal text "data: you are fired".
+	want := "id: 1\nevent: comment\n" +
+		"data: hi\ndata: id: 999\ndata: event: adminMessage\ndata: data: you are fired\n\n"
+	if frame != want {
+		t.Fatalf("frame = %q, want %q", frame, want)
+	}
+}
+
+// TestEventStreamHandlesEveryLineEnding covers the three terminators a client
+// recognises, including the doubled forms that would otherwise emit a blank line and
+// dispatch the event early.
+func TestEventStreamHandlesEveryLineEnding(t *testing.T) {
+	for _, testCase := range []struct {
+		data string
+		want string
+	}{
+		{"a\nb", "data: a\ndata: b\n\n"},
+		{"a\r\nb", "data: a\ndata: b\n\n"},
+		{"a\rb", "data: a\ndata: b\n\n"},
+		// A doubled terminator is a blank line in the payload, which has to be sent as
+		// an empty data line rather than ending the event.
+		{"a\r\rb", "data: a\ndata: \ndata: b\n\n"},
+		{"a\n\nb", "data: a\ndata: \ndata: b\n\n"},
+		// One trailing terminator is how a value is usually written; it is dropped
+		// rather than becoming a trailing blank line.
+		{"a\n", "data: a\n\n"},
+		{"a\r\n", "data: a\n\n"},
+		{"a\r", "data: a\n\n"},
+		// Exactly one, though: a payload that genuinely ends in a blank line keeps it.
+		{"a\n\n", "data: a\ndata: \n\n"},
+		{"a\r\n\r\n", "data: a\ndata: \n\n"},
+	} {
+		stream, recorder := newTestStream(t)
+		if err := stream.Send(Event{Data: testCase.data}); err != nil {
+			t.Fatalf("Send(%q): %v", testCase.data, err)
+		}
+		if got := recorder.Body.String(); got != testCase.want {
+			t.Fatalf("data %q produced %q, want %q", testCase.data, got, testCase.want)
+		}
+		// Exactly one event: a second terminator anywhere means the payload split the
+		// event in two.
+		if count := strings.Count(recorder.Body.String(), "\n\n"); count != 1 {
+			t.Fatalf("data %q produced %d events", testCase.data, count)
+		}
+	}
+}
+
+// TestEventStreamRejectsACarriageReturnInAField is the single-line half of the same
+// problem: a CR ends the field just as an LF does.
+func TestEventStreamRejectsACarriageReturnInAField(t *testing.T) {
+	stream, _ := newTestStream(t)
+
+	if err := stream.Send(Event{ID: "1\rdata: forged", Data: "real"}); err == nil {
+		t.Fatal("a carriage return in an id was accepted")
+	}
+	if err := stream.Send(Event{Name: "x\rdata: forged", Data: "real"}); err == nil {
+		t.Fatal("a carriage return in a name was accepted")
+	}
+	if err := stream.Comment("x\rdata: forged"); err == nil {
+		t.Fatal("a carriage return in a comment was accepted")
+	}
+}
+
+// TestEventStreamRejectsAnEventWithNoData covers a silent no-op: a client dispatches an
+// event only when it has data, so an id or a name on its own is written, accepted, and
+// then ignored by every browser.
+func TestEventStreamRejectsAnEventWithNoData(t *testing.T) {
+	stream, recorder := newTestStream(t)
+
+	if err := stream.Send(Event{Name: "ping"}); err == nil {
+		t.Fatal("an event with a name and no data was accepted")
+	}
+	if err := stream.Send(Event{ID: "7"}); err == nil {
+		t.Fatal("an event with an id and no data was accepted")
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("body = %q, want nothing written", recorder.Body.String())
+	}
+
+	// A retry on its own is a directive rather than an event, so it is allowed.
+	if err := stream.Send(Event{Retry: 2 * time.Second}); err != nil {
+		t.Fatalf("a retry-only event was rejected: %v", err)
+	}
+	if recorder.Body.String() != "retry: 2000\n\n" {
+		t.Fatalf("body = %q", recorder.Body.String())
+	}
+}
+
+// TestEventStreamWritesHeadersWhenItOpens pins the behavior the docs lead with. Without
+// the explicit WriteHeader, the status is only committed by the first event, so a
+// stream that sends nothing for a minute has not answered the request at all.
+func TestEventStreamWritesHeadersWhenItOpens(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c := &Context{
+		Response: NewResponseWriter(recorder),
+		Request:  httptest.NewRequest(http.MethodGet, "/events", nil),
+	}
+
+	stream, err := c.EventStream()
+	if err != nil {
+		t.Fatalf("EventStream: %v", err)
+	}
+	defer stream.Close()
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d before the first event", recorder.Code)
+	}
+	tracked, ok := ResponseWriterFrom(c.Response)
+	if !ok || !tracked.Written() {
+		t.Fatal("the response was not committed when the stream opened")
+	}
+	if !recorder.Flushed {
+		t.Fatal("the headers were not flushed when the stream opened")
+	}
+}
+
+// TestEventStreamOnANilStream keeps a zero value from taking the process down: an
+// EventStream is returned alongside an error, and a caller that forgets to check it
+// should get another error rather than a panic.
+func TestEventStreamOnANilStream(t *testing.T) {
+	var stream *EventStream
+
+	stream.Close() // must not panic
+	if err := stream.Send(Event{Data: "x"}); err == nil {
+		t.Fatal("Send on a nil stream was accepted")
+	}
+	if err := stream.Comment("x"); err == nil {
+		t.Fatal("Comment on a nil stream was accepted")
+	}
+}
+
+// TestEventStreamSurvivingItsHandlerReportsAnError covers the natural mistake of handing
+// the stream to a producer goroutine. net/http clears the response writer once the
+// handler returns, so a later write is a nil dereference — on a goroutine no recovery
+// middleware is watching, which takes the process down.
+func TestEventStreamSurvivingItsHandlerReportsAnError(t *testing.T) {
+	streams := make(chan *EventStream, 1)
+
+	server := httptest.NewServer(New().Handler())
+	defer server.Close()
+
+	app := New()
+	app.Get("/events", func(c *Context) error {
+		stream, err := c.EventStream()
+		if err != nil {
+			return err
+		}
+		streams <- stream
+		return stream.Send(Event{Data: "one"})
+	})
+
+	live := httptest.NewServer(app)
+	defer live.Close()
+
+	response, err := http.Get(live.URL + "/events")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	response.Body.Close()
+
+	stream := <-streams
+	// The handler has returned; this is the write that used to panic.
+	if err := stream.Send(Event{Data: "late"}); err == nil {
+		t.Fatal("a write after the handler returned was reported as success")
+	}
+	if err := stream.Send(Event{Data: "later"}); err == nil {
+		t.Fatal("the stream did not close itself after failing")
+	}
+}

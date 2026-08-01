@@ -2,6 +2,7 @@ package ossein
 
 import (
 	"errors"
+	"io/fs"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -187,19 +188,248 @@ func TestRedirectRejectsANonRedirectStatus(t *testing.T) {
 	}
 }
 
-// TestRedirectRejectsANewlineInTheLocation covers response splitting. Go drops a header
-// whose value has a newline, which turns an injection attempt into a redirect that
-// silently does not redirect; reporting it is both safe and debuggable.
-func TestRedirectRejectsANewlineInTheLocation(t *testing.T) {
-	err := Redirect(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil),
-		http.StatusFound, "/ok\r\nX-Injected: yes")
-	if err == nil {
-		t.Fatal("a location with a newline was accepted")
+// TestRedirectRejectsALineBreakInTheLocation covers response splitting, and pins the
+// reason the check exists. The first version of this comment claimed Go drops such a
+// header; it does not — it replaces the line breaks with spaces, so the redirect points
+// somewhere the caller never wrote. The sub-test below verifies that rather than
+// asserting it.
+func TestRedirectRejectsALineBreakInTheLocation(t *testing.T) {
+	for _, location := range []string{
+		"/ok\r\nX-Injected: yes",
+		"/ok\nX-Injected: yes",
+		"/ok\rX-Injected: yes",
+	} {
+		err := Redirect(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil),
+			http.StatusFound, location)
+		if err == nil {
+			t.Fatalf("location %q was accepted", location)
+		}
+		if !strings.Contains(err.Error(), "contains a line break") {
+			t.Fatalf("error = %v", err)
+		}
 	}
-	if !strings.Contains(err.Error(), "contains a newline") {
-		t.Fatalf("error = %v", err)
+
+	t.Run("go mangles rather than drops", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", "/ok\r\nX-Injected: yes")
+			w.WriteHeader(http.StatusFound)
+		}))
+		defer server.Close()
+
+		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
+		response, err := client.Get(server.URL)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer response.Body.Close()
+
+		if response.Header.Get("X-Injected") != "" {
+			t.Fatal("the header was actually injected")
+		}
+		if got := response.Header.Get("Location"); got == "" {
+			t.Fatal("Go dropped the header after all; the check's rationale needs updating")
+		} else if got == "/ok" {
+			t.Fatalf("Location = %q, which would be harmless; the rationale needs updating", got)
+		}
+	})
+}
+
+// TestRedirectRejectsAStatusThatDoesNotRedirect covers the codes a range check would
+// wave through. 304 must not carry a body and http.Redirect writes one; 300, 305, and
+// 306 use Location for something other than "go here", or not at all.
+func TestRedirectRejectsAStatusThatDoesNotRedirect(t *testing.T) {
+	for _, status := range []int{
+		http.StatusMultipleChoices,
+		http.StatusNotModified,
+		http.StatusUseProxy,
+		306,
+	} {
+		err := Redirect(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil),
+			status, "/new")
+		if err == nil {
+			t.Fatalf("status %d was accepted as a redirect", status)
+		}
+	}
+
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		recorder := httptest.NewRecorder()
+		if err := Redirect(recorder, httptest.NewRequest(http.MethodGet, "/", nil),
+			status, "/new"); err != nil {
+			t.Fatalf("status %d was rejected: %v", status, err)
+		}
+		if recorder.Code != status {
+			t.Fatalf("status %d produced %d", status, recorder.Code)
+		}
 	}
 }
+
+// TestRedirectDelegatesToNetHTTP pins the two behaviors inherited from http.Redirect,
+// so neither is a surprise and neither can be dropped unnoticed: a GET gets a short
+// HTML body naming the target, and a relative location resolves against the request.
+func TestRedirectDelegatesToNetHTTP(t *testing.T) {
+	app := New()
+	app.Get("/a/b/c", func(c *Context) error {
+		return c.Redirect(http.StatusFound, "next")
+	})
+
+	response := serveOnce(app, http.MethodGet, "/a/b/c")
+
+	if got := response.Result().Header.Get("Location"); got != "/a/b/next" {
+		t.Fatalf("Location = %q, want the relative target resolved against the request", got)
+	}
+	if !strings.Contains(response.Body.String(), `<a href="/a/b/next">`) {
+		t.Fatalf("body = %q, want the HTML body net/http writes for a GET",
+			response.Body.String())
+	}
+}
+
+// TestHelpersRefuseToWriteOverACommittedResponse covers the mistake that produces a
+// response with one status, one set of headers, and two bodies concatenated — whose
+// only symptom is a "superfluous response.WriteHeader call" line in the server log.
+func TestHelpersRefuseToWriteOverACommittedResponse(t *testing.T) {
+	writes := map[string]func(*Context) error{
+		"JSON":       func(c *Context) error { return c.JSON(http.StatusOK, map[string]int{"n": 1}) },
+		"Text":       func(c *Context) error { return c.Text(http.StatusOK, "second") },
+		"Blob":       func(c *Context) error { return c.Blob(http.StatusOK, "text/csv", []byte("x")) },
+		"Stream":     func(c *Context) error { return c.Stream(http.StatusOK, "text/csv", strings.NewReader("x")) },
+		"Redirect":   func(c *Context) error { return c.Redirect(http.StatusFound, "/elsewhere") },
+		"File":       func(c *Context) error { return c.File(writeTempFile(t, "second.txt", "x")) },
+		"Attachment": func(c *Context) error { return c.Attachment(writeTempFile(t, "third.txt", "x"), "n.txt") },
+	}
+
+	for name, write := range writes {
+		var second error
+		app := New()
+		app.Get("/twice", func(c *Context) error {
+			if err := c.Text(http.StatusCreated, "first"); err != nil {
+				return err
+			}
+			second = write(c)
+			return nil
+		})
+
+		response := serveOnce(app, http.MethodGet, "/twice")
+
+		if second == nil {
+			t.Fatalf("%s wrote over a committed response without complaint", name)
+		}
+		if !strings.Contains(second.Error(), "already written with status 201") {
+			t.Fatalf("%s error = %v", name, second)
+		}
+		if response.Body.String() != "first" {
+			t.Fatalf("%s appended to the first response: %q", name, response.Body.String())
+		}
+	}
+}
+
+// TestFileReportsAMissingPath is why File does not simply delegate. ServeFile answers a
+// missing file with a plain-text "404 page not found", which in a JSON API is a second
+// error contract, and returns nothing the handler could notice.
+func TestFileReportsAMissingPath(t *testing.T) {
+	app := New()
+	app.Get("/missing", func(c *Context) error {
+		return c.File(filepath.Join(t.TempDir(), "absent.txt"))
+	})
+	app.Get("/directory", func(c *Context) error {
+		return c.File(t.TempDir())
+	})
+
+	for _, path := range []string{"/missing", "/directory"} {
+		response := serveOnce(app, http.MethodGet, path)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404", path, response.Code)
+		}
+		if !strings.Contains(response.Body.String(), "file_not_found") {
+			t.Fatalf("%s body = %q, want the application's error contract",
+				path, response.Body.String())
+		}
+	}
+}
+
+func TestFileFSReportsAMissingName(t *testing.T) {
+	app := New()
+	app.Get("/assets/{name}", func(c *Context) error {
+		return c.FileFS(fstest.MapFS{"logo.svg": &fstest.MapFile{Data: []byte("<svg/>")}},
+			c.Param("name"))
+	})
+
+	response := serveOnce(app, http.MethodGet, "/assets/absent.svg")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "file_not_found") {
+		t.Fatalf("body = %q", response.Body.String())
+	}
+}
+
+// TestAttachmentDoesNotLabelAnErrorResponse covers the ordering. Setting the header
+// first and letting the file lookup fail leaves the download name — often user data —
+// on a 404, and a browser saves the error page under it.
+func TestAttachmentDoesNotLabelAnErrorResponse(t *testing.T) {
+	app := New()
+	app.Get("/download", func(c *Context) error {
+		return c.Attachment(filepath.Join(t.TempDir(), "absent.csv"), "customer-list.csv")
+	})
+
+	response := serveOnce(app, http.MethodGet, "/download")
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if got := response.Result().Header.Get("Content-Disposition"); got != "" {
+		t.Fatalf("Content-Disposition = %q on an error response", got)
+	}
+}
+
+// TestBlobAndStreamReportAFailedWrite keeps a disconnected client from looking like a
+// successful response, which is what an access log would then record.
+func TestBlobAndStreamReportAFailedWrite(t *testing.T) {
+	failure := errors.New("connection reset")
+
+	if err := Blob(&refusingWriter{header: http.Header{}, err: failure},
+		http.StatusOK, "text/plain", []byte("x")); !errors.Is(err, failure) {
+		t.Fatalf("Blob error = %v, want the write failure", err)
+	}
+	if err := Stream(&refusingWriter{header: http.Header{}, err: failure},
+		http.StatusOK, "text/plain", strings.NewReader("x")); !errors.Is(err, failure) {
+		t.Fatalf("Stream error = %v, want the write failure", err)
+	}
+}
+
+func TestStreamUsesTheGivenStatus(t *testing.T) {
+	app := New()
+	app.Get("/stream", func(c *Context) error {
+		return c.Stream(http.StatusAccepted, "text/plain", strings.NewReader("queued"))
+	})
+
+	if response := serveOnce(app, http.MethodGet, "/stream"); response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", response.Code)
+	}
+}
+
+// writeTempFile creates a file and returns its path.
+func writeTempFile(t *testing.T, name, contents string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
+}
+
+// refusingWriter fails every write, the shape of a client that has gone away.
+type refusingWriter struct {
+	header http.Header
+	err    error
+}
+
+func (w *refusingWriter) Header() http.Header       { return w.header }
+func (w *refusingWriter) WriteHeader(int)           {}
+func (w *refusingWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func TestFileServesFromDisk(t *testing.T) {
 	directory := t.TempDir()
@@ -384,5 +614,81 @@ func TestStreamDefaultsToOctetStream(t *testing.T) {
 	response := serveOnce(app, http.MethodGet, "/stream")
 	if got := response.Result().Header.Get("Content-Type"); got != "application/octet-stream" {
 		t.Fatalf("Content-Type = %q", got)
+	}
+}
+
+// TestFileFSRejectsADirectoryAndReportsOtherFailures covers the two remaining lookup
+// outcomes. A directory is not a file, so it is a 404; an unreadable one is the
+// server's problem and must not be reported as absent, which would send someone
+// hunting for content that is there.
+func TestFileFSRejectsADirectoryAndReportsOtherFailures(t *testing.T) {
+	assets := fstest.MapFS{
+		"images/logo.svg": &fstest.MapFile{Data: []byte("<svg/>")},
+	}
+
+	app := New()
+	app.Get("/dir", func(c *Context) error {
+		return c.FileFS(assets, "images")
+	})
+	app.Get("/unreadable", func(c *Context) error {
+		return c.FileFS(refusingFS{}, "locked.svg")
+	})
+
+	directory := serveOnce(app, http.MethodGet, "/dir")
+	if directory.Code != http.StatusNotFound {
+		t.Fatalf("directory status = %d, want 404", directory.Code)
+	}
+
+	unreadable := serveOnce(app, http.MethodGet, "/unreadable")
+	if unreadable.Code != http.StatusInternalServerError {
+		t.Fatalf("unreadable status = %d, want 500 (body %q)",
+			unreadable.Code, unreadable.Body.String())
+	}
+	if strings.Contains(unreadable.Body.String(), "file_not_found") {
+		t.Fatalf("an unreadable file was reported as missing: %q", unreadable.Body.String())
+	}
+}
+
+// refusingFS denies every lookup, the shape of a permission problem or a broken mount.
+type refusingFS struct{}
+
+func (refusingFS) Open(name string) (fs.File, error) {
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
+}
+
+func TestAttachmentRejectsADirectory(t *testing.T) {
+	app := New()
+	app.Get("/download", func(c *Context) error {
+		return c.Attachment(t.TempDir(), "data.csv")
+	})
+
+	response := serveOnce(app, http.MethodGet, "/download")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if got := response.Result().Header.Get("Content-Disposition"); got != "" {
+		t.Fatalf("Content-Disposition = %q on an error response", got)
+	}
+}
+
+func TestFileFSRefusesToWriteOverACommittedResponse(t *testing.T) {
+	assets := fstest.MapFS{"logo.svg": &fstest.MapFile{Data: []byte("<svg/>")}}
+
+	var second error
+	app := New()
+	app.Get("/twice", func(c *Context) error {
+		if err := c.Text(http.StatusCreated, "first"); err != nil {
+			return err
+		}
+		second = c.FileFS(assets, "logo.svg")
+		return nil
+	})
+
+	response := serveOnce(app, http.MethodGet, "/twice")
+	if second == nil {
+		t.Fatal("FileFS wrote over a committed response without complaint")
+	}
+	if response.Body.String() != "first" {
+		t.Fatalf("body = %q", response.Body.String())
 	}
 }

@@ -22,6 +22,11 @@ type Event struct {
 	Name string
 	// Data is the payload. A multi-line value is sent as multiple data lines and
 	// arrives at the client rejoined with newlines.
+	//
+	// CRLF and lone CR are normalized to LF first. The wire format treats all three
+	// as line terminators, so a carriage return cannot be carried inside data by any
+	// encoding — leaving one in place would end the line at the client and let the
+	// rest of the value be read as new fields.
 	Data string
 	// Retry is the client's reconnection delay. Zero leaves it unchanged. It is sent
 	// with millisecond resolution, so a shorter value is rejected rather than
@@ -68,6 +73,9 @@ func (c *Context) EventStream() (*EventStream, error) {
 
 // Send writes one event and flushes it.
 func (s *EventStream) Send(event Event) error {
+	if s == nil {
+		return errors.New("ossein: event stream is nil")
+	}
 	if s.closed {
 		return errors.New("ossein: event stream is closed")
 	}
@@ -75,9 +83,20 @@ func (s *EventStream) Send(event Event) error {
 		return errors.New("ossein: event is empty")
 	}
 
-	// A newline in any single-line field would start a new field, letting a value
-	// forge an event — the stream equivalent of header injection. Data is exempt
-	// because its newlines are encoded as separate data lines below.
+	// A client dispatches an event only when it has data, so an id or a name without
+	// any would be written, accepted, and then silently ignored by every browser. A
+	// retry on its own is different: it is a directive, not an event, and is not meant
+	// to be dispatched.
+	if event.Data == "" && (event.ID != "" || event.Name != "") {
+		return errors.New(
+			"ossein: event has no data, so no client will dispatch it; " +
+				"send a retry on its own if that is what was meant",
+		)
+	}
+
+	// A line terminator in any single-line field would end it and let the rest be read
+	// as new fields — the stream equivalent of header injection. Data is exempt because
+	// its terminators are encoded as separate data lines below.
 	if err := checkEventField("event id", event.ID); err != nil {
 		return err
 	}
@@ -105,9 +124,17 @@ func (s *EventStream) Send(event Event) error {
 		frame.WriteString("retry: " + strconv.FormatInt(event.Retry.Milliseconds(), 10) + "\n")
 	}
 	if event.Data != "" {
-		// A trailing newline in the value would otherwise end the event early.
-		for _, line := range strings.Split(strings.TrimSuffix(event.Data, "\n"), "\n") {
-			frame.WriteString("data: " + strings.TrimSuffix(line, "\r") + "\n")
+		// Normalized before splitting, so every line boundary in the value is one this
+		// encoder chose. Splitting on LF alone and trimming a trailing CR is not enough:
+		// a client ends a line on CR too, so "a\rid: 999" would arrive as a data line
+		// followed by a forged id field.
+		data := strings.ReplaceAll(event.Data, "\r\n", "\n")
+		data = strings.ReplaceAll(data, "\r", "\n")
+
+		// One trailing terminator is dropped: it is how a value is usually written, and
+		// keeping it would emit a blank line, which ends the event early.
+		for _, line := range strings.Split(strings.TrimSuffix(data, "\n"), "\n") {
+			frame.WriteString("data: " + line + "\n")
 		}
 	}
 	frame.WriteString("\n")
@@ -120,6 +147,9 @@ func (s *EventStream) Send(event Event) error {
 // It is how a stream is kept alive through an idle proxy: a comment costs nothing and
 // resets the idle timer that would otherwise drop the connection.
 func (s *EventStream) Comment(text string) error {
+	if s == nil {
+		return errors.New("ossein: event stream is nil")
+	}
 	if s.closed {
 		return errors.New("ossein: event stream is closed")
 	}
@@ -130,12 +160,33 @@ func (s *EventStream) Comment(text string) error {
 }
 
 // Close marks the stream finished. Later writes report an error rather than appending
-// to a response the handler has moved on from. It is safe to call more than once.
+// to a response the handler has moved on from. It is safe to call more than once, and
+// on a nil stream.
 func (s *EventStream) Close() {
+	if s == nil {
+		return
+	}
 	s.closed = true
 }
 
-func (s *EventStream) write(frame string) error {
+// write emits a frame and pushes it to the client.
+//
+// The recover is for a stream that outlived its handler. net/http clears the response's
+// buffered writer once a handler returns, so a write after that is a nil dereference —
+// and a producer goroutine holding the stream is a natural enough shape that it should
+// come back as an error rather than take the process down from a goroutine no recovery
+// middleware is watching.
+func (s *EventStream) write(frame string) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.closed = true
+			err = fmt.Errorf(
+				"ossein: event stream is no longer writable, "+
+					"which happens when it outlives its handler: %v", recovered,
+			)
+		}
+	}()
+
 	if _, err := s.writer.Write([]byte(frame)); err != nil {
 		return fmt.Errorf("ossein: write event: %w", err)
 	}

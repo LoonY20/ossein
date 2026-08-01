@@ -145,20 +145,32 @@ Ossein uses semantic versioning for published releases.
   and size tracking, the access log, and the committed-response guard keep working —
   which is what dropping to the raw writer costs. An unspecified content type becomes
   `application/octet-stream` rather than being left for `net/http` to sniff, since
-  sniffing is how a text upload comes back as HTML. `Redirect` rejects a non-3xx status,
-  where the Location header is advisory and the redirect silently does not happen, and a
-  location containing a newline, which Go drops rather than reports. `File` delegates to
-  `net/http`, so range and conditional requests work; `FileFS` exists next to it because
-  a name from a request must not be able to escape the directory it is served from; and
-  `Attachment` encodes the filename with `mime.FormatMediaType`, since a download name is
-  frequently user data
+  sniffing is how a text upload comes back as HTML, and each of them refuses to write
+  over a response that was already sent rather than appending a second body to it.
+  `Redirect` accepts only a status that redirects — 301, 302, 303, 307, 308, not the rest
+  of the 3xx range, where Location means something else and 304 must not carry the body
+  `http.Redirect` writes — and rejects a location containing a line break, which Go
+  replaces with spaces rather than rejecting, leaving a redirect to somewhere nobody
+  wrote. `File` delegates to `net/http`, so range and conditional requests work, but
+  reports a missing file, a directory, or an unreadable path as an error, so a handler
+  can fall back and the response stays in the application's error contract instead of
+  ServeFile's plain-text 404. `FileFS` exists next to it because a name from a request
+  must not be able to escape the directory it is served from; and `Attachment` encodes
+  the filename with `mime.FormatMediaType` and sets the header only once the file is
+  known to exist, since a download name is frequently user data and would otherwise be
+  stamped on an error response
 - `Context.EventStream` for server-sent events. Headers are written and flushed when the
   stream opens, so the connection is live before the first event and a writer that cannot
   flush is reported there rather than at the first send — a stream that cannot flush
   delivers nothing until the handler returns, which for a stream is never. Multi-line
-  data becomes multiple data lines, a trailing newline does not end the event early, and
-  a newline in an id, name, or comment is rejected because it would let a value forge an
-  event. `X-Accel-Buffering: no` is set, without which nginx holds every event until its
+  data becomes multiple data lines and one trailing terminator does not end the event
+  early. Carriage returns in data are normalized to newlines, because a client ends a
+  line on CR as well and a bare one left in place would end the data line and let the
+  rest be read as forged fields; a line break in an id, name, or comment is rejected for
+  the same reason. An event with no data is rejected, since no client dispatches one — a
+  retry on its own is still allowed, being a directive rather than an event. A write from
+  a stream that outlived its handler is reported as an error instead of panicking a
+  goroutine no recovery middleware is watching. `X-Accel-Buffering: no` is set, without which nginx holds every event until its
   proxy buffer fills. The Ossein response writer is preserved, so a stream is logged and
   the error handler will not write over it
 - typed configuration understands more than scalars. `[]string`, `[]int`, and lists
