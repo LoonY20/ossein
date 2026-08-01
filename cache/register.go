@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	ossein "github.com/LoonY20/ossein"
@@ -61,8 +62,14 @@ func RegisterMemory(app *ossein.App, memory *Memory, options ...RegisterOption) 
 	// which is only alive for the duration of startup.
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
+	// Whether the janitor was ever launched. A stop hook that waits unconditionally
+	// deadlocks when an earlier start hook failed, or when Stop is called without
+	// Start — and App.Stop attempts every hook, so one that blocks takes the whole
+	// shutdown with it.
+	var running atomic.Bool
 
 	app.OnStart(func(context.Context) error {
+		running.Store(true)
 		go func() {
 			defer close(stopped)
 			ticker := time.NewTicker(settings.interval)
@@ -81,6 +88,9 @@ func RegisterMemory(app *ossein.App, memory *Memory, options ...RegisterOption) 
 
 	app.OnStop(func(ctx context.Context) error {
 		stopJanitor()
+		if !running.Load() {
+			return nil
+		}
 		// Waited for, so the goroutine cannot outlive the application it was
 		// registered against — a test that starts and stops several would
 		// otherwise accumulate them.

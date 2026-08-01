@@ -3,7 +3,6 @@ package cache_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -118,33 +117,14 @@ func TestAddRespectsTheBound(t *testing.T) {
 	}
 }
 
-// TestExpiredEntriesGoBeforeLiveOnes checks the ordering between the two
-// reclamation mechanisms: a bounded cache should drop what is already dead
-// before it starts discarding data someone might still want.
-func TestExpiredEntriesGoBeforeLiveOnes(t *testing.T) {
-	store := cache.NewMemory(cache.WithMaxEntries(4))
-	ctx := context.Background()
-
-	for i := 0; i < 3; i++ {
-		if err := store.Set(ctx, fmt.Sprintf("stale-%d", i), []byte("v"), 10*time.Millisecond); err != nil {
-			t.Fatalf("Set: %v", err)
-		}
-	}
-	if err := store.Set(ctx, "keep", []byte("v"), time.Hour); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	time.Sleep(30 * time.Millisecond)
-
-	if err := store.Set(ctx, "fresh", []byte("v"), time.Hour); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-
-	// "keep" is the oldest live key, so a bound that evicted blindly would take
-	// it even though three dead entries were available.
-	if _, err := store.Get(ctx, "keep"); err != nil {
-		t.Fatalf("a live key was evicted while expired ones remained: %v", err)
-	}
-}
+// Removed: a test asserting that expired entries are evicted before live ones.
+//
+// It used four entries, all inside one cleanup sample, so it could only pass, and
+// the property it named is not one the driver provides. Eviction is by age of use;
+// what keeps dead entries from accumulating is the cleanup cursor, which
+// TestBoundedCleanupCoversEveryKey covers. Writing a test that pinned an ordering
+// between the two mechanisms would mean pinning an outcome that depends on where
+// the cursor happens to be.
 
 // TestUnboundedCacheKeepsEverythingLive is the default, stated as a test so a
 // bound cannot creep in as one.
@@ -330,18 +310,25 @@ func TestBoundedGetReclaimsAnExpiredKey(t *testing.T) {
 	if _, err := store.Get(ctx, "0"); !errors.Is(err, cache.ErrMiss) {
 		t.Fatalf("an expired key was returned: %v", err)
 	}
-	if got := store.Len(); got == 20 {
-		t.Fatal("reading an expired key reclaimed nothing")
+	// More than the key that was read: the read also cleans a sample, which is
+	// what keeps a read-heavy process from accumulating dead entries.
+	if got := store.Len(); got >= 19 {
+		t.Fatalf("the cache holds %d of 20 entries; reading an expired key dropped "+
+			"only that key and cleaned no sample", got)
 	}
 
-	// A miss on an absent key cleans too, which is how an idle-but-read process
-	// recovers memory.
+	// A miss on an absent key cleans too, which is how a process that only reads
+	// recovers memory. Asserted as a reclamation, not merely as "no growth".
 	before := store.Len()
+	if before == 0 {
+		t.Fatal("nothing was left to reclaim")
+	}
 	if _, err := store.Get(ctx, "absent"); !errors.Is(err, cache.ErrMiss) {
 		t.Fatalf("Get: %v", err)
 	}
-	if store.Len() > before {
-		t.Fatal("a miss added an entry")
+	if store.Len() >= before {
+		t.Fatalf("a miss reclaimed nothing: %d entries before, %d after",
+			before, store.Len())
 	}
 }
 
@@ -384,5 +371,251 @@ func TestZeroValueMemoryAcceptsWrites(t *testing.T) {
 	}
 	if string(value) != "v" {
 		t.Fatalf("value = %q", value)
+	}
+}
+
+// TestBoundedCleanupCoversEveryKey is the property the first version of the bound
+// destroyed. Cleanup samples a window, and if the window never advances it
+// re-walks the same keys forever — so a bounded cache reclaimed strictly less
+// than an unbounded one, which is the opposite of what a memory bound is for.
+//
+// The comparison is run both ways against the same workload.
+func TestBoundedCleanupCoversEveryKey(t *testing.T) {
+	for _, mode := range []struct {
+		name  string
+		store *cache.Memory
+	}{
+		{"unbounded", cache.NewMemory()},
+		// A bound high enough that eviction never runs, so cleanup is the only
+		// thing reclaiming anything.
+		{"bounded", cache.NewMemory(cache.WithMaxEntries(1000))},
+	} {
+		ctx := context.Background()
+
+		// Keys that never expire, sitting where a sample would start.
+		for i := 0; i < 20; i++ {
+			if err := mode.store.Set(ctx, "permanent-"+strconv.Itoa(i), []byte("v"), 0); err != nil {
+				t.Fatalf("%s: Set: %v", mode.name, err)
+			}
+		}
+		for i := 0; i < 50; i++ {
+			if err := mode.store.Set(ctx, "stale-"+strconv.Itoa(i), []byte("v"), 10*time.Millisecond); err != nil {
+				t.Fatalf("%s: Set: %v", mode.name, err)
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+
+		// Ordinary traffic, which is what drives reclamation.
+		for i := 0; i < 200; i++ {
+			if err := mode.store.Set(ctx, "traffic-"+strconv.Itoa(i), []byte("v"), time.Hour); err != nil {
+				t.Fatalf("%s: Set: %v", mode.name, err)
+			}
+		}
+
+		before := mode.store.Len()
+		reclaimed := mode.store.PurgeExpired()
+		if reclaimed != 0 {
+			t.Fatalf("%s: %d of %d entries were still expired after 200 writes; "+
+				"cleanup never reached them", mode.name, reclaimed, before)
+		}
+	}
+}
+
+// TestCleanupResumesWhereItStopped pins the cursor. Without one, every sample
+// restarts at the front, so a cache larger than the sample window never has its
+// tail visited.
+func TestCleanupResumesWhereItStopped(t *testing.T) {
+	store := cache.NewMemory()
+	ctx := context.Background()
+
+	// Four sample windows' worth, all expiring together.
+	const entries = 64
+	for i := 0; i < entries; i++ {
+		if err := store.Set(ctx, "stale-"+strconv.Itoa(i), []byte("v"), 10*time.Millisecond); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	// Exactly four more writes: enough to visit every key once, and no more.
+	for i := 0; i < entries/16; i++ {
+		if err := store.Set(ctx, "live-"+strconv.Itoa(i), []byte("v"), 0); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+	}
+
+	if got := store.Len(); got != entries/16 {
+		t.Fatalf("the cache holds %d entries, want only the %d live ones: "+
+			"cleanup did not advance through the list", got, entries/16)
+	}
+}
+
+// TestRegisterMemoryStopWithoutStartDoesNotHang covers a shutdown that runs
+// without a startup: an earlier start hook failed, or the application was stopped
+// without ever being started. A hook that waits for a goroutine which never
+// launched blocks forever, and App.Stop attempts every hook, so one blocked hook
+// takes the whole shutdown with it.
+func TestRegisterMemoryStopWithoutStartDoesNotHang(t *testing.T) {
+	t.Run("never started", func(t *testing.T) {
+		app := ossein.New()
+		if err := cache.RegisterMemory(app, cache.NewMemory()); err != nil {
+			t.Fatalf("RegisterMemory: %v", err)
+		}
+		assertStopReturns(t, app)
+	})
+
+	t.Run("start failed first", func(t *testing.T) {
+		app := ossein.New()
+		app.OnStart(func(context.Context) error { return errors.New("dependency is down") })
+		if err := cache.RegisterMemory(app, cache.NewMemory()); err != nil {
+			t.Fatalf("RegisterMemory: %v", err)
+		}
+		if err := app.Start(context.Background()); err == nil {
+			t.Fatal("expected the failing start hook to be reported")
+		}
+		assertStopReturns(t, app)
+	})
+}
+
+// assertStopReturns fails rather than hanging the suite.
+func assertStopReturns(t *testing.T, app *ossein.App) {
+	t.Helper()
+
+	done := make(chan error, 1)
+	go func() { done <- app.Stop(context.Background()) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop never returned")
+	}
+}
+
+// TestBoundedGetReturnsACopy matches the contract the shared-lock read follows.
+// Handing back the stored slice would let a caller mutating its result corrupt
+// every later read of that key.
+func TestBoundedGetReturnsACopy(t *testing.T) {
+	store := cache.NewMemory(cache.WithMaxEntries(10))
+	ctx := context.Background()
+
+	if err := store.Set(ctx, "key", []byte("first"), time.Hour); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	value, err := store.Get(ctx, "key")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	value[0] = 'X'
+
+	again, err := store.Get(ctx, "key")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(again) != "first" {
+		t.Fatalf("value = %q, want the stored bytes untouched", again)
+	}
+}
+
+// TestCleanupLeavesEntriesWithNoExpiryAlone covers the guard that separates "no
+// deadline" from "deadline in the past", since a zero time is before every now.
+func TestCleanupLeavesEntriesWithNoExpiryAlone(t *testing.T) {
+	store := cache.NewMemory()
+	ctx := context.Background()
+
+	for i := 0; i < 40; i++ {
+		if err := store.Set(ctx, "permanent-"+strconv.Itoa(i), []byte("v"), 0); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+	}
+	for i := 0; i < 40; i++ {
+		if err := store.Set(ctx, "traffic-"+strconv.Itoa(i), []byte("v"), time.Hour); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+	}
+
+	for i := 0; i < 40; i++ {
+		if _, err := store.Get(ctx, "permanent-"+strconv.Itoa(i)); err != nil {
+			t.Fatalf("a key with no expiry was reclaimed: %v", err)
+		}
+	}
+}
+
+// TestRegisterMemoryOptionsAreGuarded matches NewMemory's handling of the same
+// mistakes. A zero interval would reach time.NewTicker, which panics — inside the
+// janitor goroutine, where nothing recovers it.
+func TestRegisterMemoryOptionsAreGuarded(t *testing.T) {
+	app := ossein.New()
+	store := cache.NewMemory()
+
+	if err := cache.RegisterMemory(app, store,
+		nil,
+		cache.WithCleanupInterval(0),
+		cache.WithCleanupInterval(-time.Second),
+	); err != nil {
+		t.Fatalf("RegisterMemory: %v", err)
+	}
+
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The default interval is a minute, so nothing should have been reclaimed by
+	// the time this runs — and the process is still alive, which is the point.
+	if err := store.Set(context.Background(), "k", []byte("v"), time.Nanosecond); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if store.Len() != 1 {
+		t.Fatal("a rejected interval was applied")
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := app.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestRegisterMemoryReportsAFailedBinding(t *testing.T) {
+	app := ossein.New()
+	if err := ossein.Instance[cache.Store](app, cache.NewMemory()); err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+
+	if err := cache.RegisterMemory(app, cache.NewMemory()); err == nil {
+		t.Fatal("a second Store binding was accepted")
+	}
+}
+
+// TestABoundedStoreCanDropAClaim is the trade stated as a test rather than left
+// for someone to discover. Eviction does not know a key is a claim, so a bounded
+// store turns exactly-once into best-effort — which is why WithMaxEntries says
+// not to use one for idempotency keys.
+func TestABoundedStoreCanDropAClaim(t *testing.T) {
+	store := cache.NewMemory(cache.WithMaxEntries(4))
+	ctx := context.Background()
+
+	claimed, err := cache.Claim(ctx, store, "delivery:1", time.Hour)
+	if err != nil || !claimed {
+		t.Fatalf("Claim = %v, %v", claimed, err)
+	}
+
+	// Ordinary traffic, well inside the lease.
+	for i := 0; i < 20; i++ {
+		if err := store.Set(ctx, "other-"+strconv.Itoa(i), []byte("v"), time.Hour); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+	}
+
+	again, err := cache.Claim(ctx, store, "delivery:1", time.Hour)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !again {
+		t.Fatal("the claim survived eviction; if that is now guaranteed, " +
+			"WithMaxEntries' warning about claims is out of date")
 	}
 }

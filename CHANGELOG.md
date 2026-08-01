@@ -128,10 +128,13 @@ Ossein uses semantic versioning for published releases.
 - `cache.WithMaxEntries` caps how much the in-memory driver holds, evicting the least
   recently used key when a write would exceed the cap. Without it the driver does not
   leak — every read and write reclaims a sample — but resident memory is TTL times
-  arrival rate, which is not a budget anyone chose. Expired entries go before live ones,
-  since a write samples for them before evicting. A bound changes reads from a shared to
-  an exclusive lock, because eviction cannot tell hot keys from cold ones unless a read
-  records that it happened, which is why it is opt-in
+  arrival rate, which is not a budget anyone chose. Eviction goes by age of use rather
+  than by expiry: a write cleans a sample first, so dead entries are usually gone before
+  it runs, but a live key can still be discarded while dead ones remain. A bound changes
+  reads from a shared to an exclusive lock, because eviction cannot tell hot keys from
+  cold ones unless a read records that it happened, which is why it is opt-in — and it
+  must not be used for a store holding claims, since evicting one lets the work it
+  guards run twice
 - `cache.RegisterMemory` binds an in-memory cache as a `Store` and reclaims its expired
   entries on a schedule, stopping the janitor during shutdown and waiting for it. Without
   a schedule, reclamation is driven by traffic, so a process that goes quiet after a burst

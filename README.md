@@ -456,8 +456,16 @@ day of memory nothing will ask for again.
 
 `WithMaxEntries` is the other half. Without a bound the driver does not leak, but
 resident memory is TTL times arrival rate, which is not a number anyone chose. With
-one, a write that would exceed the cap evicts the least recently used key — expired
-entries first, since every write samples for them before evicting live data.
+one, a write that would exceed the cap evicts the least recently used key. Eviction
+goes by age of use, not by expiry: every write cleans a sample first, so dead entries
+are usually gone before it runs, but a live key can still be discarded while dead ones
+remain elsewhere. Discarding live data is what makes it a bound.
+
+A bound and a claim do not mix. `Claim` and `Once` need a key to stay present for its
+lease, and eviction does not know a key is a claim — dropping one early lets the work
+it guards run a second time. Leave a store holding idempotency keys unbounded, with the
+janitor to reclaim expired ones, and keep a bounded store for data that is merely
+expensive to recompute.
 
 A bound changes how reads are tracked: unbounded, a read takes a shared lock and the
 ordering list is only a cleanup cursor; bounded, a read has to record that it

@@ -38,11 +38,12 @@ store := cache.NewMemory()
 
 The memory driver copies values when storing and loading them, so callers
 cannot mutate cached data without another `Set`. It removes an expired entry
-when that key is read and inspects a bounded round-robin sample for other
-expired entries on that path and on every `Set`. This deterministic amortized
-cleanup visits every resident key as cache activity continues while keeping
-per-operation cleanup work bounded. Applications can request a complete pass
-and inspect the result with:
+when that key is read and inspects a bounded sample for other expired entries
+on that path and on every write. The sample advances on its own cursor, so
+successive operations continue where the last one stopped and every resident
+key is visited as cache activity continues, while per-operation cleanup work
+stays bounded. Applications can request a complete pass and inspect the result
+with:
 
 ```go
 removed := store.PurgeExpired()
@@ -52,10 +53,32 @@ The zero value of `cache.Memory` is also ready for use.
 
 The driver is appropriate for local development, tests, and data that may be
 different in every application process. It is not a replacement for a shared
-cache when an application runs on multiple instances. It has no hard entry or
-memory limit: permanent entries and a high number of simultaneously live TTL
-entries can still consume unbounded memory. Use bounded key cardinality or a
-backend with an eviction policy when that risk matters.
+cache when an application runs on multiple instances.
+
+By default it has no entry limit: permanent entries and a high number of
+simultaneously live TTL entries consume as much memory as their arrival rate
+times their lifetime. `WithMaxEntries` turns that into a budget:
+
+```go
+store := cache.NewMemory(cache.WithMaxEntries(10_000))
+```
+
+A write that would exceed the cap evicts the least recently used key. Eviction
+is by age of use, not by expiry: cleaning a sample happens first, so dead
+entries are usually gone before eviction runs, but a live key can still be
+discarded while dead ones remain elsewhere. Discarding live data is what makes
+it a bound.
+
+A bound changes how reads are tracked. Unbounded, a read takes a shared lock
+and the ordering list is only insertion order. Bounded, a read has to record
+that it happened — otherwise eviction cannot tell hot keys from cold ones — so
+it takes the exclusive lock. That cost is why the bound is opt-in.
+
+**A bound and a claim do not mix.** `Claim` and `Once` depend on a key staying
+present for its lease, and eviction does not know a key is a claim: dropping one
+early lets the work it guards run a second time. Leave a store holding
+idempotency keys, run-once markers, or leases unbounded, and keep a bounded one
+for data that is merely expensive to recompute.
 
 ## Raw values
 
@@ -143,7 +166,23 @@ coordinate loaders explicitly at their service boundary.
 
 ## Dependency injection
 
-Register the concrete driver behind the interface:
+`RegisterMemory` binds the driver behind the interface and reclaims expired
+entries on a schedule:
+
+```go
+store := cache.NewMemory()
+if err := cache.RegisterMemory(app, store, cache.WithCleanupInterval(time.Minute)); err != nil {
+	return err
+}
+```
+
+The schedule covers what traffic cannot: cleanup otherwise runs only on reads
+and writes, so a process that goes quiet after a burst holds every expired entry
+until its next write. The janitor starts with the application and is stopped and
+waited for during shutdown.
+
+A driver can also be registered as an ordinary constructor when no janitor is
+wanted:
 
 ```go
 if err := ossein.ProvideAs[cache.Store](app, cache.NewMemory); err != nil {

@@ -231,3 +231,62 @@ func TestInstanceRegistersExistingValue(t *testing.T) {
 		t.Fatal("expected Resolve to return the registered instance")
 	}
 }
+
+// TestVariadicConstructorParametersAreOptionsNotDependencies covers the shape a
+// constructor takes once it grows configuration. Nothing can be resolved for a
+// []Option, and treating one as a dependency turns adding an option parameter
+// into a breaking change: every existing registration fails at startup with
+// "service []Option is not registered".
+func TestVariadicConstructorParametersAreOptionsNotDependencies(t *testing.T) {
+	type option func(*string)
+	type widget struct{ name string }
+	type dependency struct{ value string }
+
+	t.Run("options only", func(t *testing.T) {
+		app := New()
+		if err := app.Provide(func(...option) *widget { return &widget{name: "built"} }); err != nil {
+			t.Fatalf("Provide: %v", err)
+		}
+		if err := app.Services().Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+
+		resolved, err := Resolve[*widget](app)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if resolved.name != "built" {
+			t.Fatalf("widget = %+v", resolved)
+		}
+	})
+
+	t.Run("dependency then options", func(t *testing.T) {
+		app := New()
+		if err := Instance(app, &dependency{value: "injected"}); err != nil {
+			t.Fatalf("Instance: %v", err)
+		}
+		if err := app.Provide(func(d *dependency, _ ...option) (*widget, error) {
+			return &widget{name: d.value}, nil
+		}); err != nil {
+			t.Fatalf("Provide: %v", err)
+		}
+
+		resolved, err := Resolve[*widget](app)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if resolved.name != "injected" {
+			t.Fatalf("the non-variadic dependency was not injected: %+v", resolved)
+		}
+	})
+
+	t.Run("a missing dependency is still reported", func(t *testing.T) {
+		app := New()
+		if err := app.Provide(func(*dependency, ...option) *widget { return &widget{} }); err != nil {
+			t.Fatalf("Provide: %v", err)
+		}
+		if err := app.Services().Validate(); err == nil {
+			t.Fatal("the missing dependency was not reported")
+		}
+	})
+}

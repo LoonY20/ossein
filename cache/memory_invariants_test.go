@@ -3,9 +3,13 @@ package cache
 import (
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	ossein "github.com/LoonY20/ossein"
 )
 
 // checkOrderInvariant verifies that the eviction list and the entry map agree.
@@ -329,4 +333,111 @@ func TestGetRechecksAnExpiredCandidateUnderTheExclusiveLock(t *testing.T) {
 		}
 		checkOrderInvariant(t, store)
 	})
+}
+
+// TestDeletingTheCursorElementKeepsCleanupAdvancing covers the one piece of
+// bookkeeping the cursor adds. A removed element has its links cleared, so a
+// cursor left pointing at one falls back to the front — and the keys behind the
+// front are then never visited.
+//
+// The layout makes that observable: the front holds keys that never expire, so a
+// sample that restarts there reclaims nothing, while one that continues reaches
+// the expired tail.
+func TestDeletingTheCursorElementKeepsCleanupAdvancing(t *testing.T) {
+	store := NewMemory()
+	ctx := context.Background()
+
+	base := time.Now()
+	store.now = func() time.Time { return base }
+
+	for i := 0; i < memoryCleanupSampleSize; i++ {
+		if err := store.Set(ctx, fmt.Sprintf("permanent-%02d", i), []byte("v"), 0); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+	}
+	for i := 0; i < memoryCleanupSampleSize; i++ {
+		if err := store.Set(ctx, fmt.Sprintf("stale-%02d", i), []byte("v"), time.Minute); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+	}
+
+	// One sample over the permanent front, leaving the cursor at the tail.
+	store.mu.Lock()
+	store.purgeSampleLocked(base)
+	cursor := store.cursor
+	store.mu.Unlock()
+	if cursor == nil {
+		t.Fatal("the cursor did not advance past the front")
+	}
+	if key := cursor.Value.(string); !strings.HasPrefix(key, "stale-") {
+		t.Fatalf("the cursor is at %q, want the expired tail", key)
+	}
+
+	// Delete exactly the key the cursor stands on, as an application dropping an
+	// idempotency key would.
+	if err := store.Delete(ctx, cursor.Value.(string)); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	checkOrderInvariant(t, store)
+
+	base = base.Add(2 * time.Minute)
+	before := store.Len()
+
+	store.mu.Lock()
+	store.purgeSampleLocked(base)
+	store.mu.Unlock()
+
+	if store.Len() == before {
+		t.Fatalf("cleanup reclaimed nothing from %d entries; the cursor fell back "+
+			"to the front, where nothing expires", before)
+	}
+	checkOrderInvariant(t, store)
+}
+
+// TestRegisterMemoryStopHonoursItsDeadline covers the shutdown timeout. A janitor
+// blocked behind a slow operation must not hold the whole shutdown open past the
+// deadline the application was given.
+//
+// The block is produced by holding the cache lock, which is what a long
+// reclamation over a large cache does from the janitor's point of view.
+func TestRegisterMemoryStopHonoursItsDeadline(t *testing.T) {
+	store := NewMemory()
+	app := ossein.New()
+
+	if err := RegisterMemory(app, store, WithCleanupInterval(time.Millisecond)); err != nil {
+		t.Fatalf("RegisterMemory: %v", err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// The janitor's next tick blocks here.
+	store.mu.Lock()
+	time.Sleep(20 * time.Millisecond)
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := app.Stop(stopCtx)
+	store.mu.Unlock()
+
+	if err == nil {
+		t.Fatal("Stop reported success while the janitor was still blocked")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want the deadline", err)
+	}
+}
+
+// TestDefaultCleanupIntervalIsShortEnoughToMatter pins the janitor's default. The
+// interval is the upper bound on how long an idle process holds expired entries,
+// so a value chosen for tidiness rather than for that number is the wrong one.
+func TestDefaultCleanupIntervalIsShortEnoughToMatter(t *testing.T) {
+	if defaultCleanupInterval <= 0 {
+		t.Fatalf("defaultCleanupInterval = %v", defaultCleanupInterval)
+	}
+	if defaultCleanupInterval > time.Minute {
+		t.Fatalf("defaultCleanupInterval = %v; an idle process would hold expired "+
+			"entries that long", defaultCleanupInterval)
+	}
 }

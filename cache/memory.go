@@ -37,6 +37,10 @@ type Memory struct {
 	order      list.List
 	now        func() time.Time
 	maxEntries int
+
+	// cursor is where the next cleanup sample starts. Nil means the front, which
+	// is also where a sample wraps back to.
+	cursor *list.Element
 }
 
 // MemoryOption configures the in-memory driver.
@@ -44,6 +48,12 @@ type MemoryOption func(*Memory)
 
 // WithMaxEntries caps how many entries the cache holds. A write that would
 // exceed the cap evicts the least recently used key first.
+//
+// A bound and a claim do not mix. Claim and Once depend on a key staying present
+// for its lease; eviction can drop one early, and the work it was guarding then
+// runs a second time. A cache used for idempotency keys, run-once jobs, or leases
+// should be left unbounded — with RegisterMemory to reclaim expired keys — and a
+// bounded one kept for data that is merely expensive to recompute.
 //
 // A non-positive value means no cap, which is the default.
 func WithMaxEntries(entries int) MemoryOption {
@@ -148,10 +158,10 @@ func (m *Memory) Set(
 	}
 	if previous, ok := m.entries[key]; ok {
 		entry.orderElement = previous.orderElement
-		if m.maxEntries > 0 {
-			// Overwriting is a use, so the key goes to the warm end.
-			m.order.MoveToBack(entry.orderElement)
-		}
+		// Overwriting is a use, so the key goes to the warm end. Done in both
+		// modes: unbounded the list is only where the cleanup cursor walks, and
+		// insertion order has no meaning there worth preserving.
+		m.order.MoveToBack(entry.orderElement)
 	} else {
 		entry.orderElement = m.order.PushBack(key)
 	}
@@ -188,44 +198,35 @@ func (m *Memory) PurgeExpired() int {
 	return m.purgeExpiredLocked(now)
 }
 
-func (m *Memory) purgeSampleLocked(now time.Time) {
-	if m.maxEntries > 0 {
-		m.scanSampleLocked(now)
-		return
-	}
-
-	limit := min(memoryCleanupSampleSize, m.order.Len())
-	for range limit {
-		element := m.order.Front()
-		key := element.Value.(string)
-		entry := m.entries[key]
-		if !entry.expiresAt.IsZero() && !now.Before(entry.expiresAt) {
-			m.deleteLocked(key, entry)
-			continue
-		}
-		m.order.MoveToBack(element)
-	}
-}
-
-// scanSampleLocked is the bounded cache's cleanup: it walks the coldest keys
-// without reordering them.
+// purgeSampleLocked reclaims expired entries from a bounded sample.
 //
-// Rotating a live entry to the back, as the unbounded cursor does, would mark it
-// as recently used and let cleanup itself decide what survives eviction. Walking
-// instead of rotating costs nothing here, because the coldest end is also where
-// expired entries collect.
-func (m *Memory) scanSampleLocked(now time.Time) {
-	// The iteration count is bounded by the list length, so the walk cannot run
-	// off the end.
-	element := m.order.Front()
+// The sample is a window that walks the ordering list on its own cursor, so
+// successive calls continue where the last one stopped and every resident key is
+// visited within a bounded number of operations.
+//
+// An earlier version had no cursor and rewound to the front each time. Unbounded
+// it compensated by rotating each visited entry to the back, which swept the list
+// over time; bounded it could not rotate, because that would mark a cold entry as
+// recently used and let cleanup decide what survives eviction — so it re-walked
+// the same front entries forever and reclaimed nothing behind them. Turning on the
+// memory bound made reclamation worse than leaving it off. A cursor gives both
+// modes the same coverage without either of them reordering anything.
+func (m *Memory) purgeSampleLocked(now time.Time) {
 	for range min(memoryCleanupSampleSize, m.order.Len()) {
-		next := element.Next()
+		if m.cursor == nil {
+			m.cursor = m.order.Front()
+		}
+		element := m.cursor
+
+		// Advanced before any removal: deleting an element clears its links, and
+		// the cursor would have nothing to continue from.
+		m.cursor = element.Next()
+
 		key := element.Value.(string)
 		entry := m.entries[key]
 		if !entry.expiresAt.IsZero() && !now.Before(entry.expiresAt) {
 			m.deleteLocked(key, entry)
 		}
-		element = next
 	}
 }
 
@@ -250,11 +251,15 @@ func (m *Memory) getAndPromote(key string) ([]byte, error) {
 	return bytes.Clone(entry.value), nil
 }
 
-// evictLocked drops the coldest keys until the cache is within its budget.
+// evictLocked drops the least recently used keys until the cache is within its
+// budget.
 //
-// Expired entries are already gone by the time this runs, since every write
-// samples for them first, so what is dropped here is live data — which is what a
-// budget means.
+// It evicts by age of use, not by expiry. Every write cleans a sample first, so
+// dead entries are usually gone before this runs, but a sample is sixteen keys and
+// a live one can be evicted while dead ones remain elsewhere. Scanning for a dead
+// victim on every over-budget write would be linear in the cache size, and at
+// steady state that is every write. A bound means live data is discarded; that is
+// what makes it a bound.
 func (m *Memory) evictLocked() {
 	if m.maxEntries <= 0 {
 		return
@@ -281,9 +286,17 @@ func (m *Memory) purgeExpiredLocked(now time.Time) int {
 
 func (m *Memory) deleteLocked(key string, entry memoryEntry) {
 	delete(m.entries, key)
-	if entry.orderElement != nil {
-		m.order.Remove(entry.orderElement)
+	// Every entry has an element, which the order invariant covers, so this is not
+	// guarded against nil: a break there should surface as a panic in a test rather
+	// than as an entry silently left in the ordering list.
+	//
+	// The cleanup cursor cannot be left pointing at a removed element: its links
+	// are cleared, so the next sample would restart from the front and the keys
+	// behind it would never be visited.
+	if m.cursor == entry.orderElement {
+		m.cursor = entry.orderElement.Next()
 	}
+	m.order.Remove(entry.orderElement)
 }
 
 func (m *Memory) currentTime() time.Time {
