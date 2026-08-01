@@ -86,11 +86,10 @@ Goal: provide the Laravel-like productivity layer while keeping generated code o
 - [x] circular-dependency detection
 - [x] optional code-generation strategy for dependency wiring
       (`ossein wire`, experimental until validated by real applications)
-- [ ] `ossein wire` staleness detection: a `//go:generate` directive and a
-      checked-in regeneration test so CI fails when the generated graph drifts
-- [ ] documented package layout `ossein wire` requires — generated code cannot
-      reference `package main`, so single-package services must restructure
-      first
+- [x] `ossein wire` staleness detection (`App.WiringFingerprint` and a generated
+      `Fingerprint` constant), plus a `//go:generate` directive in the output
+- [x] documented package layout `ossein wire` requires — generated code cannot
+      reference `package main`, so single-package services must restructure first
 - [x] `ossein new`
 - [x] `ossein dev`
 - [x] `ossein routes`

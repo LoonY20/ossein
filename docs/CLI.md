@@ -84,6 +84,60 @@ if err != nil {
 services.UserService.Handle(...)
 ```
 
+### Package layout
+
+Generated code is imported, so it cannot reference `package main` — which makes the
+layout a prerequisite rather than something to discover from an error. A service
+whose constructors live in its `main` package has to move them into an importable
+package before `wire` can generate anything:
+
+```
+cmd/server/main.go          // registration and startup
+internal/config/config.go   // from ossein new
+internal/http/routes.go     // from ossein new
+internal/app/services.go    // exported constructors: NewUserService, NewUserRepository
+internal/wiring/            // generated
+```
+
+`ossein new` creates the first three; the package holding the constructors is the one
+an application adds, and where it lives is its own choice — only "not `main`" is
+required.
+
+### Keeping the file current
+
+Generated wiring is checked in, so it can go stale: add a service, forget to
+regenerate, and the file describes an older graph with nothing to say so. The
+generated file carries a `//go:generate ossein wire` directive, so `go generate ./...`
+refreshes it, and a `Fingerprint` constant identifying the graph it came from:
+
+```go
+func TestWiringIsCurrent(t *testing.T) {
+	app := app.New()  // the same function main uses to build and register
+	if app.WiringFingerprint() != wiring.Fingerprint {
+		t.Fatal("service graph changed; run `go generate ./...`")
+	}
+}
+```
+
+The test needs the application the generator saw, which means registration has to
+live in a function a test can call rather than inline in `main`. That is the same
+requirement as generating at all — registration code has to be reachable — so it is
+not an extra one, but it is a real one: a test that re-registers services by hand
+fingerprints its own graph, not the application's, and would not notice a service
+added to `main`.
+
+The fingerprint covers which types are registered, what builds each one (including
+whether it returns an error, which changes the generated call site), what each needs,
+and how long each lives. Renaming a variable inside a constructor does not move it;
+adding a parameter to one does. Comparing the generated *source* instead would fail
+for a reformatting or a reworded comment, which is not what anyone wants a CI check
+to catch.
+
+It is stable across builds for the registrations `wire` supports — exported, named,
+top-level constructors. It is not stable for a closure, whose generated name carries
+a counter that moves when an unrelated closure is added earlier in the same function;
+generation rejects those anyway.
+
 Rules the generator enforces instead of guessing:
 
 - singleton services become `Services` fields; transient services become

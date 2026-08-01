@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -81,6 +82,16 @@ func run(
 	case "routes":
 		return executeGoCommand([]string{"run", "./cmd/server", "routes"}, stdin, stdout, stderr)
 	case "migrate", "migrate:rollback", "migrate:status", "db:seed", "wire":
+		// Every application command addresses ./cmd/server and writes relative
+		// paths, so it only means anything from the module root. A generated file
+		// carries a //go:generate directive, and go generate runs each directive in
+		// the directory of the file that holds it — which for generated wiring is
+		// internal/wiring, not the root. Moving there first is what makes the
+		// directive work instead of failing the whole module's go generate.
+		if err := changeToModuleRoot(); err != nil {
+			fmt.Fprintln(stderr, "ossein:", err)
+			return 1
+		}
 		commandArgs := append([]string{"run", "./cmd/server"}, args...)
 		return executeGoCommand(commandArgs, stdin, stdout, stderr)
 	case "make:controller", "make:middleware", "make:request":
@@ -404,3 +415,35 @@ func (request *%s) Validate() error {
 	return validation.OrNil()
 }
 `
+
+// changeToModuleRoot moves to the nearest ancestor directory holding a go.mod.
+//
+// It is a no-op when the working directory is already the root, which is the usual
+// case; it exists for the one that is not, a //go:generate directive running from
+// the package that holds the generated file.
+func changeToModuleRoot() error {
+	root, err := findModuleRoot()
+	if err != nil {
+		return err
+	}
+	return os.Chdir(root)
+}
+
+// findModuleRoot walks up from the working directory looking for go.mod.
+func findModuleRoot() (string, error) {
+	directory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("determine working directory: %w", err)
+	}
+
+	for {
+		if _, err := os.Stat(filepath.Join(directory, "go.mod")); err == nil {
+			return directory, nil
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return "", errors.New("no go.mod found in this directory or any parent")
+		}
+		directory = parent
+	}
+}

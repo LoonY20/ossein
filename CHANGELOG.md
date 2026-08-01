@@ -125,6 +125,14 @@ Ossein uses semantic versioning for published releases.
   than falling back to the racy form, because a guarantee that quietly is not one produces
   a failure that looks like an application bug. A claim is a lease, so its TTL must be
   positive: one that never expires is a tombstone that only an explicit delete can lift
+- `App.WiringFingerprint` and a `Fingerprint` constant in generated wiring, so a
+  stale generated file fails a test instead of silently describing an older graph.
+  Add a service, forget to re-run the generator, and nothing said so. The fingerprint
+  covers what the generated code depends on — which types are registered, what builds
+  each one, what each needs, and how long each lives — and is stable across processes,
+  so it can be compared with a constant compiled at another time
+- generated wiring carries a `//go:generate ossein wire` directive, so `go generate
+  ./...` regenerates it without the line having to be added somewhere by hand
 - driver-neutral SQL error classification: `database.Classify`, plus
   `IsUniqueViolation`, `IsExclusionViolation`, `IsForeignKeyViolation`,
   `IsNotNullViolation`, `IsCheckViolation`, `IsLockTimeout`, and `IsRetryable`, with
@@ -265,6 +273,10 @@ Ossein uses semantic versioning for published releases.
 
 ### Changed
 
+- generated parameter names handle acronyms: an `*sql.DB` instance registration
+  produced `dB`, and an `HTTPClient` would have produced `hTTPClient`. Go type names
+  carry acronyms in full caps, so lowercasing only the first rune reads like a typo in
+  every generated file
 - a service constructor's variadic parameter is treated as options rather than as a
   dependency, so a constructor gaining one keeps working in the container. Without
   that, adding an option parameter to an existing constructor turns every
