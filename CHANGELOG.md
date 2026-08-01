@@ -125,6 +125,17 @@ Ossein uses semantic versioning for published releases.
   than falling back to the racy form, because a guarantee that quietly is not one produces
   a failure that looks like an application bug. A claim is a lease, so its TTL must be
   positive: one that never expires is a tombstone that only an explicit delete can lift
+- driver-neutral SQL error classification: `database.Classify`, plus
+  `IsUniqueViolation`, `IsForeignKeyViolation`, `IsNotNullViolation`,
+  `IsCheckViolation`, and `IsRetryable`. Detecting a duplicate key otherwise means
+  matching a driver's message in application code, which silently breaks the day the
+  DSN points at a different engine — a change the `database` package otherwise makes a
+  config edit. Errors are recognised through the interfaces drivers expose, a SQLSTATE
+  or a SQLite extended code, before falling back to matching text for drivers that put
+  the code nowhere else; MySQL's SQLSTATE 23000 is deliberately not read, since it names
+  any integrity constraint. `database.NewClassifier` takes recognizers that run before
+  the built-in ones, because this package cannot import a driver and should not have to
+  be released before an application can teach it about one
 - `cache.WithMaxEntries` caps how much the in-memory driver holds, evicting the least
   recently used key when a write would exceed the cap. Without it the driver does not
   leak — every read and write reclaims a sample — but resident memory is TTL times

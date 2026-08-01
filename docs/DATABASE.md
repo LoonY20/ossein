@@ -207,6 +207,64 @@ The callback error is preserved for `errors.Is`. Panics are rolled back before
 being re-thrown. Use `*sql.TxOptions` when a specific isolation level or
 read-only transaction is required.
 
+## Classifying errors
+
+Branching on a database failure — "that code is taken, generate another", "that
+transaction lost a deadlock, run it again" — otherwise means matching a driver's
+message, which breaks the day the DSN points at a different engine:
+
+```go
+if database.IsUniqueViolation(err) {
+    return errCodeTaken
+}
+if database.IsRetryable(err) {
+    return retry(ctx, work)
+}
+```
+
+`Classify` names the failure; `IsUniqueViolation`, `IsForeignKeyViolation`,
+`IsNotNullViolation`, `IsCheckViolation`, and `IsRetryable` are the predicates.
+Wrapped errors are unwrapped, so an error carried up through a repository is still
+recognised.
+
+### How a driver is recognised, and where that is fragile
+
+This package cannot import a driver: the core has no third-party dependencies, and
+an application should not inherit one it does not use. So errors are recognised
+through whatever a driver exposes, in this order:
+
+1. `SQLState() string`, which PostgreSQL drivers implement. This is a standard and
+   the most reliable.
+2. `Code() int`, which the pure-Go SQLite driver implements, carrying the extended
+   result code that distinguishes constraint kinds.
+3. The error message, for `go-sql-driver/mysql` and `mattn/go-sqlite3`, which keep
+   their codes in struct fields with no accessor.
+
+A structured code always wins over the message, so a driver that says what happened
+is never overruled by text that looks like something else. The third mechanism is
+the fragile one: a driver is free to reword its errors, and a localized message will
+not match. When it is wrong the answer is `ClassUnknown`, which is what an
+application would have had anyway.
+
+MySQL's SQLSTATE is deliberately not read. It reports every integrity constraint as
+`23000`, so trusting it would name a broken foreign key a duplicate key.
+
+### Teaching it a driver
+
+```go
+classifier := database.NewClassifier(func(err error) (database.ErrorClass, bool) {
+    var driverErr *somedriver.Error
+    if errors.As(err, &driverErr) && driverErr.Code == 1234 {
+        return database.ClassUniqueViolation, true
+    }
+    return database.ClassUnknown, false
+})
+```
+
+Recognizers run before the built-in ones, so this both extends and corrects. An
+application that imports its driver anyway can assert on the concrete type, which is
+always more reliable than anything this package can do from the outside.
+
 ## Migrations
 
 Connection management is driver-neutral, but migration SQL is not. The

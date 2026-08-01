@@ -831,7 +831,7 @@ The ID lives on the `Job` rather than only in the worker's context, so a durable
 keeps the connection across a restart — the case where correlating by timestamp is
 hardest and matters most.
 
-### 15. No driver-neutral SQL error classification
+### 15. No driver-neutral SQL error classification — RESOLVED
 
 Detecting a unique-violation on a custom short code means string-matching the
 driver's message in application code:
@@ -847,6 +847,28 @@ which the `database` package otherwise makes a config change.
 `IsSerializationFailure(err)`, implemented per dialect without importing any
 driver (SQLSTATE and vendor codes are reachable through small interface
 assertions).
+
+**Resolution.** `database.Classify` and five predicates. `linkr`'s
+`strings.Contains(err.Error(), "UNIQUE constraint failed")` is gone.
+
+**The parenthetical in that proposal was half wrong.** SQLSTATE is reachable through
+an interface assertion — PostgreSQL drivers expose `SQLState() string` — and so are
+SQLite extended codes on the pure-Go driver, which exposes `Code() int`. But
+`go-sql-driver/mysql` and `mattn/go-sqlite3` keep their codes in *struct fields* with
+no accessor, so no interface assertion reaches them, and reflection is not available
+here: it is confined to the container and typed config. Those two are recognised by
+matching their message, which is the thing this note set out to eliminate.
+
+Doing it once in the framework is still worth it — every application matching the same
+strings, worse, is the alternative — but the honest framing is that the mechanism
+varies by driver rather than being uniform. So the ordering is explicit: a structured
+code always wins over text, the fallback is documented as the fragile part, and
+`NewClassifier` takes recognizers that run first, because this package cannot import a
+driver and should not have to ship a release before an application can correct it.
+
+One more thing the proposal missed: MySQL reports *every* integrity constraint as
+SQLSTATE 23000, so reading SQLSTATE alone would report a broken foreign key as a
+duplicate key. That value is deliberately left unrecognised.
 
 ### 16. `ossein wire` cannot detect its own staleness
 

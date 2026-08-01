@@ -86,6 +86,8 @@ Today Ossein intentionally stays small:
   transactions, configurable lock timeouts, and real-database concurrency
   coverage;
 - transaction helper with explicit `*sql.Tx`;
+- driver-neutral SQL error classification: unique violations, broken references,
+  deadlocks, and serialization failures, with a hook for an unknown driver;
 - ordered transactional seeders and `ossein db:seed`;
 - generic test factories with sequences, states, and persistence hooks;
 - composed application command handling for migrations and seeders;
